@@ -9,6 +9,56 @@ type AnalyzeRequestBody = {
   taskType?: string;
 };
 
+type MarginComments = {
+  aufgabenbezug: string[];
+  inhalt: string[];
+  fachlichkeit: string[];
+  materialbezug: string[];
+  argumentation: string[];
+  struktur: string[];
+  spracheVorsichtig: string[];
+};
+
+type AnalysisResult = {
+  context?: {
+    subject?: string;
+    gradeLevel?: string;
+    taskType?: string;
+  };
+  extractedExpectation?: {
+    taskType?: string;
+    operators?: string[];
+    criteria?: Array<{
+      name?: string;
+      expectedElements?: string[];
+      weighting?: string;
+    }>;
+  };
+  marginComments?: Partial<MarginComments>;
+  finalComment?: string;
+  limitations?: {
+    spellingAssessment?: string;
+    note?: string;
+  };
+};
+
+const FORBIDDEN_MARGIN_PHRASES = [
+  "aber",
+  "jedoch",
+  "insgesamt",
+  "grundsätzlich",
+  "zeigt",
+  "wirkt",
+  "könnte",
+  "teilweise",
+  "nachvollziehbar",
+  "weitgehend",
+  "argumentation wird analysiert",
+  "bewertung erfolgt",
+  "text wird dargestellt",
+  "es wird beschrieben",
+];
+
 export default async function handler(req: any, res: any) {
   if (req.method === "OPTIONS") {
     return res.status(200).json({ ok: true });
@@ -22,17 +72,20 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const sanitizedText = String(req.body?.sanitizedText ?? "").trim();
-  const expectationHorizonText = String(req.body?.expectationHorizonText ?? "").trim();
-  const assignmentText = String(req.body?.assignmentText ?? "").trim();
-  const subject = String(req.body?.subject ?? "").trim();
-  const gradeLevel = String(req.body?.gradeLevel ?? "").trim();
-  const taskType = String(req.body?.taskType ?? "").trim();
+  const body = (req.body ?? {}) as AnalyzeRequestBody;
+
+  const sanitizedText = String(body.sanitizedText ?? "").trim();
+  const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
+  const assignmentText = String(body.assignmentText ?? "").trim();
+  const subject = String(body.subject ?? "").trim();
+  const gradeLevel = String(body.gradeLevel ?? "").trim();
+  const taskType = String(body.taskType ?? "").trim();
 
   if (!sanitizedText) {
     return res.status(400).json({
       ok: false,
       error: "MISSING_SANITIZED_TEXT",
+      message: "sanitizedText fehlt.",
     });
   }
 
@@ -40,6 +93,7 @@ export default async function handler(req: any, res: any) {
     return res.status(400).json({
       ok: false,
       error: "MISSING_EXPECTATION_HORIZON",
+      message: "expectationHorizonText fehlt.",
     });
   }
 
@@ -49,6 +103,7 @@ export default async function handler(req: any, res: any) {
     return res.status(500).json({
       ok: false,
       error: "MISSING_API_KEY",
+      message: "OPENAI_API_KEY ist nicht gesetzt.",
     });
   }
 
@@ -74,7 +129,7 @@ export default async function handler(req: any, res: any) {
       },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
-        temperature: 0.2,
+        temperature: 0,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -94,6 +149,7 @@ export default async function handler(req: any, res: any) {
 
     if (!response.ok) {
       const text = await response.text();
+
       return res.status(500).json({
         ok: false,
         error: "OPENAI_ERROR",
@@ -104,10 +160,10 @@ export default async function handler(req: any, res: any) {
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content ?? "";
 
-    let parsed: unknown;
+    let parsed: AnalysisResult;
 
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(content) as AnalysisResult;
     } catch {
       return res.status(500).json({
         ok: false,
@@ -116,9 +172,15 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    const cleanedAnalysis = normalizeAnalysis(parsed, {
+      subject,
+      gradeLevel,
+      taskType,
+    });
+
     return res.status(200).json({
       ok: true,
-      analysis: parsed,
+      analysis: cleanedAnalysis,
     });
   } catch (err: any) {
     return res.status(500).json({
@@ -149,6 +211,10 @@ function buildPrompt(input: {
   return `
 Analysiere einen anonymisierten Schülertext auf Grundlage eines individuell bereitgestellten Erwartungshorizonts.
 
+PRIORITÄT:
+Wenn eine Regel verletzt wird, ist die Antwort ungültig.
+Lieber weniger Kommentare als falsche Kommentare.
+
 KONTEXT:
 Fach: ${subject || "nicht angegeben"}
 Klassenstufe/Jahrgang: ${gradeLevel || "nicht angegeben"}
@@ -165,9 +231,10 @@ ${sanitizedText}
 
 GRUNDPRINZIP:
 Der Erwartungshorizont ist die verbindliche Bewertungsgrundlage.
-Du extrahierst zuerst die Kriterien aus dem Erwartungshorizont und spiegelst den Schülertext anschließend daran.
+Extrahiere zuerst die Kriterien aus dem Erwartungshorizont.
+Spiegele den Schülertext anschließend ausschließlich an diesen Kriterien.
 Die Bewertung muss fach- und jahrgangsangemessen erfolgen.
-Wenn Fach, Klassenstufe oder Aufgabenart fehlen, formuliere neutral und vermeide abiturbezogene Zuspitzungen.
+Wenn Fach, Klassenstufe oder Aufgabenart fehlen, formuliere neutral.
 
 WICHTIGE REGELN:
 - Erfinde keine zusätzlichen Bewertungskriterien.
@@ -178,42 +245,41 @@ WICHTIGE REGELN:
 - Stelle keine Fragen an Schüler*innen.
 - Verwende keinen Coaching-Ton.
 - Formuliere wie Randbemerkungen und ein kurzes Gutachten zu einer schulischen Leistungsüberprüfung.
-- Formuliere sachlich, knapp, fachsprachlich und korrekturpraktisch.
 - Passe Anspruchsniveau und Wortwahl an Fach und Klassenstufe an.
-- Benenne Stärken und Defizite präzise.
-- Jede Randbemerkung muss sich auf den Schülertext oder den Erwartungshorizont beziehen.
+- Jede Randbemerkung muss sich auf den Schülertext oder auf den Erwartungshorizont beziehen.
 - Keine erfundenen Textstellen.
 - Keine freien pädagogischen Ratschläge ohne Bezug zur Leistung.
 
 SPRACHLICHE EINSCHRÄNKUNG:
 Der Schülertext kann aus OCR/Texterkennung stammen.
-Rechtschreibung, Zeichensetzung und einzelne Grammatikfehler dürfen daher NICHT abschließend bewertet werden.
+Rechtschreibung, Zeichensetzung und einzelne Grammatikfehler dürfen NICHT abschließend bewertet werden.
 
-Verbotene Formulierungen:
+Verbotene Formulierungen zur Sprache:
 - "häufige Rechtschreibfehler"
 - "fehlerhafte Zeichensetzung"
 - "sprachlich mangelhaft"
 - "viele Grammatikfehler"
 
-Erlaubte vorsichtige Formulierungen:
-- "Auf Satz- und Formulierungsebene zeigen sich stellenweise Unklarheiten."
-- "Einzelne sprachliche Auffälligkeiten sollten am Originaltext überprüft werden."
-- "Eine abschließende Bewertung von Rechtschreibung und Zeichensetzung ist auf Grundlage der Texterkennung nicht zuverlässig möglich."
-- "Die sprachliche Bewertung kann nur eingeschränkt erfolgen, da mögliche OCR-Ungenauigkeiten zu berücksichtigen sind."
+Erlaubte vorsichtige Formulierungen zur Sprache:
+- "Formulierungsebene stellenweise unklar."
+- "Sprachliche Auffälligkeiten am Originaltext prüfen."
+- "Rechtschreibung auf OCR-Grundlage nicht zuverlässig bewertbar."
+- "Zeichensetzung auf OCR-Grundlage nicht zuverlässig bewertbar."
 
-FORMULIERUNGSSTIL FÜR RANDBEMERKUNGEN (VERBINDLICH):
 FORMULIERUNGSSTIL FÜR RANDBEMERKUNGEN (STRIKT):
-
 Jede Randbemerkung MUSS exakt diesem Muster folgen:
 
-→ Subjekt weglassen
-→ direkt mit dem Befund beginnen
-→ maximal ein kurzer Hauptsatz
-→ keine Nebensätze
-→ keine Konjunktionen (kein "aber", "jedoch", "da")
-→ keine Einleitungen
+- direkt mit dem Befund beginnen
+- maximal ein kurzer Hauptsatz
+- keine Nebensätze
+- keine Konjunktionen
+- keine Einleitungen
+- keine Aufgabenbeschreibung
+- keine neutralen Aussagen ohne Bewertung
+- maximal 8 bis 10 Wörter
+- Punkt am Ende
 
-STRIKT VERBOTEN:
+STRIKT VERBOTEN IN RANDBEMERKUNGEN:
 - "aber"
 - "jedoch"
 - "insgesamt"
@@ -222,9 +288,23 @@ STRIKT VERBOTEN:
 - "wirkt"
 - "könnte"
 - "teilweise"
+- "nachvollziehbar"
+- "weitgehend"
+- "Argumentation wird analysiert"
+- "Bewertung erfolgt"
+- "Text wird dargestellt"
+- "Es wird beschrieben"
 
-ERLAUBT SIND NUR KURZE KORREKTURSÄTZE WIE:
+Randbemerkungen dürfen KEINE Aufgabenbeschreibung enthalten.
+Randbemerkungen müssen IMMER einen Mangel oder eine Qualität benennen.
 
+Jede Bemerkung beantwortet implizit:
+- Was fehlt?
+- Was ist unklar?
+- Was ist zu schwach?
+- Was ist gelungen?
+
+ERLAUBTE STRUKTUREN:
 - "Argumentation bleibt oberflächlich."
 - "Beispiel wird nicht erläutert."
 - "Materialbezug fehlt."
@@ -234,21 +314,15 @@ ERLAUBT SIND NUR KURZE KORREKTURSÄTZE WIE:
 - "Gedankengang bricht ab."
 - "Bezug zum Text bleibt unklar."
 - "Bewertung nicht ausreichend begründet."
+- "Zentrale These treffend erfasst."
+- "Beleg funktional eingebunden."
+- "Fachbegriff sicher verwendet."
 
-FORMAT:
-
-- Jeder Eintrag = genau EIN kurzer Satz
-- maximal 8–10 Wörter
-- Punkt am Ende
-- keine weiteren Erklärungen
-
-BEISPIEL:
-
-FALSCH:
-"Die Argumentation ist nachvollziehbar, bleibt jedoch wenig differenziert."
-
-RICHTIG:
-"Argumentation bleibt wenig differenziert."
+NICHT ERLAUBT:
+- reine Beschreibung ohne Bewertung
+- neutrale Aussagen ohne Defizit oder Qualität
+- zusammenfassende Meta-Beschreibungen
+- Coaching-Formulierungen
 
 Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
 
@@ -291,5 +365,122 @@ AUSGABEREGELN:
 - Schreibe keine erklärenden Sätze außerhalb des JSON.
 - Der finalComment soll 3 bis 5 sachliche Sätze umfassen.
 - Der finalComment darf keine Note und keine Punktzahl enthalten.
+- Der finalComment darf länger sein als Randbemerkungen.
 `;
+}
+
+function normalizeAnalysis(
+  parsed: AnalysisResult,
+  fallbackContext: {
+    subject: string;
+    gradeLevel: string;
+    taskType: string;
+  }
+): AnalysisResult {
+  const marginComments = normalizeMarginComments(parsed.marginComments);
+
+  return {
+    context: {
+      subject: parsed.context?.subject || fallbackContext.subject || "",
+      gradeLevel: parsed.context?.gradeLevel || fallbackContext.gradeLevel || "",
+      taskType: parsed.context?.taskType || fallbackContext.taskType || "",
+    },
+    extractedExpectation: {
+      taskType: parsed.extractedExpectation?.taskType || fallbackContext.taskType || "",
+      operators: Array.isArray(parsed.extractedExpectation?.operators)
+        ? parsed.extractedExpectation?.operators ?? []
+        : [],
+      criteria: Array.isArray(parsed.extractedExpectation?.criteria)
+        ? parsed.extractedExpectation?.criteria?.map((criterion) => ({
+            name: String(criterion?.name ?? "").trim(),
+            expectedElements: Array.isArray(criterion?.expectedElements)
+              ? criterion.expectedElements.map((item) => String(item).trim()).filter(Boolean)
+              : [],
+            weighting: String(criterion?.weighting ?? "").trim(),
+          })) ?? []
+        : [],
+    },
+    marginComments,
+    finalComment: String(parsed.finalComment ?? "").trim(),
+    limitations: {
+      spellingAssessment: "not_reliable_due_to_ocr",
+      note:
+        String(parsed.limitations?.note ?? "").trim() ||
+        "Rechtschreibung und Zeichensetzung sind auf Grundlage möglicher OCR-Ungenauigkeiten nicht zuverlässig bewertbar.",
+    },
+  };
+}
+
+function normalizeMarginComments(
+  input: AnalysisResult["marginComments"]
+): MarginComments {
+  const empty: MarginComments = {
+    aufgabenbezug: [],
+    inhalt: [],
+    fachlichkeit: [],
+    materialbezug: [],
+    argumentation: [],
+    struktur: [],
+    spracheVorsichtig: [],
+  };
+
+  if (!input || typeof input !== "object") {
+    return empty;
+  }
+
+  return {
+    aufgabenbezug: cleanCommentArray(input.aufgabenbezug),
+    inhalt: cleanCommentArray(input.inhalt),
+    fachlichkeit: cleanCommentArray(input.fachlichkeit),
+    materialbezug: cleanCommentArray(input.materialbezug),
+    argumentation: cleanCommentArray(input.argumentation),
+    struktur: cleanCommentArray(input.struktur),
+    spracheVorsichtig: cleanCommentArray(input.spracheVorsichtig),
+  };
+}
+
+function cleanCommentArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => normalizeSingleComment(String(item ?? "")))
+    .filter(Boolean)
+    .filter((item) => !containsForbiddenMarginPhrase(item))
+    .slice(0, 4);
+}
+
+function normalizeSingleComment(value: string): string {
+  const cleaned = value
+    .replace(/\s+/g, " ")
+    .replace(/[!?]+$/g, "")
+    .trim();
+
+  if (!cleaned) {
+    return "";
+  }
+
+  const firstSentence = cleaned.split(/[.;:]/)[0]?.trim() ?? "";
+
+  if (!firstSentence) {
+    return "";
+  }
+
+  const words = firstSentence.split(/\s+/).slice(0, 10);
+  const shortened = words.join(" ").trim();
+
+  if (!shortened) {
+    return "";
+  }
+
+  return shortened.endsWith(".") ? shortened : `${shortened}.`;
+}
+
+function containsForbiddenMarginPhrase(value: string): boolean {
+  const lower = value.toLowerCase();
+
+  return FORBIDDEN_MARGIN_PHRASES.some((phrase) =>
+    lower.includes(phrase.toLowerCase())
+  );
 }
