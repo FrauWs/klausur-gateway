@@ -214,6 +214,49 @@ Nutze bevorzugt knappe schulische Formulierungen dieser Art:
 - "Die Bearbeitung zeigt ein tragfähiges Grundverständnis, bleibt aber in der Ausführung lückenhaft."
 - "Die Leistung erfüllt die Anforderungen in wesentlichen Teilen, weist jedoch deutliche Einschränkungen in der Präzision auf."
 
+ZIEL DER RANDBEMERKUNGEN:
+
+Die Randbemerkungen müssen wie echte Korrekturanmerkungen in einer Schülerarbeit formuliert sein.
+
+Das bedeutet:
+- kurze, präzise, operative Sätze
+- direkte Bewertung einzelner Aspekte
+- keine zusammenfassenden Meta-Beschreibungen
+- keine allgemeinen Einschätzungen wie "grundsätzlich" oder "insgesamt"
+
+VERMEIDE:
+- "zeigt ein grundlegendes Verständnis"
+- "ist nachvollziehbar"
+- "insgesamt gelungen"
+- "weitgehend erfüllt"
+- "könnte verbessert werden"
+
+BEVORZUGE STATTDESSEN:
+- "wird nicht konsequent ausgeführt"
+- "bleibt zu allgemein"
+- "nicht ausreichend belegt"
+- "nicht präzise genug"
+- "nur ansatzweise vorhanden"
+- "nicht differenziert"
+- "Argument wird nicht weiterentwickelt"
+- "Beispiel wird nicht erläutert"
+- "Bezug zum Material bleibt oberflächlich"
+
+FORMAT DER RANDBEMERKUNGEN:
+
+Jeder Eintrag in marginComments muss ein einzelner, abgeschlossener Korrektursatz sein.
+
+Keine Mehrfachsätze.
+Keine Begründungsketten.
+Keine Einleitungen.
+Keine Abschwächungen.
+
+Beispiel korrekt:
+"Der Materialbezug wird nicht ausreichend präzise hergestellt."
+
+Beispiel falsch:
+"Der Materialbezug ist vorhanden, aber könnte noch verbessert werden, da er nicht immer klar ist."
+
 Wenn eine Aufgabenart fachlich nicht zu einzelnen Kategorien passt, lasse die jeweilige Kategorie leer, statt etwas zu erfinden.
 
 Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
