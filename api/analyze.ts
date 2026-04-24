@@ -29,7 +29,28 @@ export default async function handler(req: any, res: any) {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000); // 15s safety
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    const prompt = `
+Du bist ein präziser Korrekturassistent für deutsche Schülertexte.
+
+Analysiere den folgenden Text anhand der Kriterien.
+
+TEXT:
+${sanitizedText}
+
+KRITERIEN:
+${rubricText}
+
+Gib deine Antwort ausschließlich als JSON im folgenden Format zurück:
+
+{
+  "summary": "Kurze Gesamteinschätzung",
+  "strengths": ["..."],
+  "issues": ["..."],
+  "nextSteps": ["..."]
+}
+`;
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -40,17 +61,17 @@ export default async function handler(req: any, res: any) {
       },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
+        temperature: 0.2,
         messages: [
           {
             role: "system",
-            content: "Du bist ein Korrekturassistent für Schultexte.",
+            content: "Antworte nur mit gültigem JSON.",
           },
           {
             role: "user",
-            content: sanitizedText,
+            content: prompt,
           },
         ],
-        temperature: 0.2,
       }),
     });
 
@@ -67,9 +88,24 @@ export default async function handler(req: any, res: any) {
 
     const data = await response.json();
 
+    const content =
+      data?.choices?.[0]?.message?.content ?? "";
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return res.status(500).json({
+        ok: false,
+        error: "INVALID_JSON_FROM_MODEL",
+        raw: content,
+      });
+    }
+
     return res.status(200).json({
       ok: true,
-      result: data,
+      analysis: parsed,
     });
   } catch (err: any) {
     return res.status(500).json({
