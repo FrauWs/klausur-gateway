@@ -39,7 +39,7 @@ export default async function handler(req: any, res: any) {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-5-3",
+        model: "gpt-4.1-mini",
         messages: [
           {
             role: "system",
