@@ -19,11 +19,9 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const body = (req.body ?? {}) as AnalyzeRequestBody;
-
-  const sanitizedText = String(body.sanitizedText ?? "").trim();
-  const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
-  const assignmentText = String(body.assignmentText ?? "").trim();
+  const sanitizedText = String(req.body?.sanitizedText ?? "").trim();
+  const expectationHorizonText = String(req.body?.expectationHorizonText ?? "").trim();
+  const assignmentText = String(req.body?.assignmentText ?? "").trim();
 
   if (!sanitizedText) {
     return res.status(400).json({
@@ -76,7 +74,7 @@ export default async function handler(req: any, res: any) {
           {
             role: "system",
             content:
-              "Du bist ein präziser Korrekturassistent für schulische Klausuren. Du gibst ausschließlich gültiges JSON zurück.",
+              "Du bist ein präziser Korrekturassistent für schulische Klausuren. Du formulierst professionell, sachlich und korrekturpraktisch. Du gibst ausschließlich gültiges JSON zurück.",
           },
           {
             role: "user",
@@ -136,72 +134,45 @@ function buildAnalysisPrompt(input: {
   return `
 Analysiere einen anonymisierten Schülertext auf Grundlage eines individuell bereitgestellten Erwartungshorizonts.
 
-WICHTIG:
-- Der Erwartungshorizont ist die maßgebliche Bewertungsgrundlage.
-- Extrahiere die Kriterien aus dem Erwartungshorizont.
-- Erfinde keine zusätzlichen Bewertungskriterien.
-- Formuliere Randbemerkungen und ein kurzes Gutachten.
-- Die Formulierungen sollen sachlich, schulisch und korrekturpraktisch verwendbar sein.
-- Es geht NICHT um eine freie allgemeine Bewertung.
-- Es geht NICHT um eine abschließende Rechtschreibdiagnose.
+GRUNDPRINZIP:
+Der Erwartungshorizont ist die verbindliche Bewertungsgrundlage.
+Du extrahierst zuerst die Kriterien aus dem Erwartungshorizont und spiegelst den Schülertext anschließend daran.
 
-EINSCHRÄNKUNG ZUR SPRACHE:
+WICHTIGE REGELN:
+- Erfinde keine zusätzlichen Bewertungskriterien.
+- Vergib keine Note.
+- Vergib keine Punkte.
+- Nenne keine personenbezogenen Daten.
+- Verwende keine Ich-Form.
+- Stelle keine Fragen an die Schüler*innen.
+- Verwende keinen Coaching-Ton.
+- Formuliere wie Randbemerkungen und ein kurzes Gutachten zu einer Klausur.
+- Formuliere sachlich, knapp, fachsprachlich und korrekturpraktisch.
+- Benenne Stärken und Defizite präzise.
+- Jede Randbemerkung muss sich auf den Schülertext oder auf den Erwartungshorizont beziehen.
+- Keine erfundenen Textstellen.
+- Keine freien pädagogischen Ratschläge ohne Bezug zur Leistung.
+
+SPRACHLICHE EINSCHRÄNKUNG:
 Der Schülertext kann aus OCR/Texterkennung stammen.
-Bewerte Rechtschreibung, Zeichensetzung und einzelne Grammatikfehler daher NICHT abschließend.
-Du darfst nur vorsichtige Hinweise auf sprachliche Muster geben, wenn sie trotz möglicher OCR-Ungenauigkeiten erkennbar sind.
-Keine Formulierungen wie:
+Rechtschreibung, Zeichensetzung und einzelne Grammatikfehler dürfen daher NICHT abschließend bewertet werden.
+
+Verbotene Formulierungen:
 - "häufige Rechtschreibfehler"
 - "fehlerhafte Zeichensetzung"
 - "sprachlich mangelhaft"
-Stattdessen vorsichtig formulieren:
+- "viele Grammatikfehler"
+
+Erlaubte vorsichtige Formulierungen:
 - "Auf Satz- und Formulierungsebene zeigen sich stellenweise Unklarheiten."
 - "Einzelne sprachliche Auffälligkeiten sollten am Originaltext überprüft werden."
 - "Eine abschließende Bewertung von Rechtschreibung und Zeichensetzung ist auf Grundlage der Texterkennung nicht zuverlässig möglich."
+- "Die sprachliche Bewertung kann nur eingeschränkt erfolgen, da mögliche OCR-Ungenauigkeiten zu berücksichtigen sind."
 
-AUFGABENSTELLUNG:
-${assignmentText || "Keine separate Aufgabenstellung übergeben."}
-
-ERWARTUNGSHORIZONT:
-${expectationHorizonText}
-
-ANONYMISIERTER SCHÜLERTEXT:
-${sanitizedText}
-
-Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
-
-{
-  "extractedExpectation": {
-    "taskType": "string",
-    "operators": ["string"],
-    "criteria": [
-      {
-        "name": "string",
-        "expectedElements": ["string"],
-        "weighting": "string oder leer"
-      }
-    ]
-  },
-  "marginComments": {
-    "content": ["string"],
-    "structure": ["string"],
-    "materialUse": ["string"],
-    "argumentation": ["string"],
-    "languageCautious": ["string"]
-  },
-  "finalComment": "string",
-  "limitations": {
-    "spellingAssessment": "not_reliable_due_to_ocr",
-    "note": "string"
-  }
-}
-
-REGELN FÜR DIE AUSGABE:
-- Jede Randbemerkung muss konkret auf den Schülertext oder den Erwartungshorizont bezogen sein.
-- Keine Noten vergeben.
-- Keine Punkte vergeben.
-- Keine personenbezogenen Daten nennen.
-- Keine Rechtschreibkorrektur einzelner Wörter.
-- Keine erfundenen Textstellen.
-- Wenn der Erwartungshorizont unklar ist, benenne dies im finalComment.
-`;
-}
+FORMULIERUNGSSTIL FÜR RANDBEMERKUNGEN:
+Nutze bevorzugt Formulierungen dieser Art:
+- "Der Aufgabenbezug ist im Wesentlichen erkennbar, bleibt jedoch stellenweise zu allgemein."
+- "Der zentrale Aspekt wird aufgegriffen, aber nicht konsequent ausgeführt."
+- "Die Darstellung bleibt an dieser Stelle ungenau."
+- "Der Materialbezug ist vorhanden, wird aber nicht ausreichend präzise genutzt."
+-
