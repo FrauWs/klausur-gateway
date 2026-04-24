@@ -201,19 +201,49 @@ Erlaubte vorsichtige Formulierungen:
 - "Eine abschließende Bewertung von Rechtschreibung und Zeichensetzung ist auf Grundlage der Texterkennung nicht zuverlässig möglich."
 - "Die sprachliche Bewertung kann nur eingeschränkt erfolgen, da mögliche OCR-Ungenauigkeiten zu berücksichtigen sind."
 
-FORMULIERUNGSSTIL FÜR RANDBEMERKUNGEN:
-Nutze bevorzugt knappe schulische Formulierungen dieser Art:
-- "Der Aufgabenbezug ist im Wesentlichen erkennbar, bleibt jedoch stellenweise zu allgemein."
-- "Der zentrale Aspekt wird aufgegriffen, aber nicht konsequent ausgeführt."
-- "Die Darstellung bleibt an dieser Stelle ungenau."
-- "Der Materialbezug ist vorhanden, wird aber nicht ausreichend präzise genutzt."
-- "Die Argumentation ist grundsätzlich nachvollziehbar, bleibt jedoch wenig differenziert."
-- "Die Gedankenführung ist erkennbar, verliert jedoch stellenweise an Stringenz."
-- "Fachbegriffe werden verwendet, aber nicht immer sicher eingebunden."
-- "Zentrale Erwartungselemente werden nur teilweise eingelöst."
-- "Die Bearbeitung zeigt ein tragfähiges Grundverständnis, bleibt aber in der Ausführung lückenhaft."
-- "Die Leistung erfüllt die Anforderungen in wesentlichen Teilen, weist jedoch deutliche Einschränkungen in der Präzision auf."
+FORMULIERUNGSSTIL FÜR RANDBEMERKUNGEN (VERBINDLICH):
 
+Alle Randbemerkungen müssen zwingend wie echte Korrekturanmerkungen formuliert sein.
+
+VERPFLICHTEND:
+- kurze, präzise, operative Einzelsätze
+- direkte Bewertung eines konkreten Aspekts
+- keine Einleitungen
+- keine Relativierungen
+- keine zusammenfassenden Aussagen
+
+STRIKT VERBOTEN:
+- "grundsätzlich"
+- "insgesamt"
+- "weitgehend"
+- "zeigt ein Verständnis"
+- "ist nachvollziehbar"
+- "könnte verbessert werden"
+- "teilweise gelungen"
+
+Wenn solche Formulierungen auftreten, ist die Antwort falsch.
+
+VERWENDE AUSSCHLIESSLICH STRUKTUREN WIE:
+
+- "wird nicht konsequent ausgeführt."
+- "bleibt zu allgemein."
+- "nicht ausreichend belegt."
+- "nicht präzise genug."
+- "nur ansatzweise vorhanden."
+- "nicht differenziert."
+- "Argument wird nicht weiterentwickelt."
+- "Beispiel wird nicht erläutert."
+- "Bezug zum Material bleibt oberflächlich."
+
+FORMAT:
+
+Jeder Eintrag = genau ein kurzer Korrektursatz.
+
+Beispiel korrekt:
+"Der Materialbezug wird nicht ausreichend präzise hergestellt."
+
+Beispiel falsch:
+"Der Materialbezug ist vorhanden, aber könnte noch verbessert werden."
 ZIEL DER RANDBEMERKUNGEN:
 
 Die Randbemerkungen müssen wie echte Korrekturanmerkungen in einer Schülerarbeit formuliert sein.
