@@ -1,5 +1,11 @@
 // api/analyze.ts
 
+declare const process: {
+  env: {
+    OPENAI_API_KEY?: string;
+  };
+};
+
 type AnalyzeRequestBody = {
   sanitizedText?: string;
   expectationHorizonText?: string;
@@ -17,12 +23,7 @@ type CriteriaResult = {
 };
 
 type AnalysisResult = {
-  context?: {
-    subject?: string;
-    gradeLevel?: string;
-    taskType?: string;
-  };
-  criteriaResults: CriteriaResult[];
+  criteriaResults?: CriteriaResult[];
 };
 
 const corsHeaders = {
@@ -32,7 +33,9 @@ const corsHeaders = {
 };
 
 function applyCors(res: any) {
-  Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
+  Object.entries(corsHeaders).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
 }
 
 function sendJson(res: any, status: number, payload: unknown) {
@@ -52,6 +55,7 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 405, {
       ok: false,
       error: "METHOD_NOT_ALLOWED",
+      method: req.method,
     });
   }
 
@@ -69,6 +73,7 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "MISSING_SANITIZED_TEXT",
+        message: "sanitizedText fehlt.",
       });
     }
 
@@ -76,15 +81,17 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "MISSING_EXPECTATION_HORIZON",
+        message: "expectationHorizonText fehlt.",
       });
     }
 
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const openaiApiKey = process.env.OPENAI_API_KEY;
 
-    if (!OPENAI_API_KEY) {
+    if (!openaiApiKey) {
       return sendJson(res, 500, {
         ok: false,
         error: "MISSING_API_KEY",
+        message: "OPENAI_API_KEY ist nicht gesetzt.",
       });
     }
 
@@ -98,14 +105,14 @@ export default async function handler(req: any, res: any) {
     });
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 25000);
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${openaiApiKey}`,
       },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
@@ -115,7 +122,7 @@ export default async function handler(req: any, res: any) {
           {
             role: "system",
             content:
-              "Du bist ein professioneller Korrekturassistent. Gib ausschließlich gültiges JSON zurück.",
+              "Du bist ein sachlicher Korrekturassistent für schulische Leistungsüberprüfungen. Du gibst ausschließlich gültiges JSON zurück.",
           },
           {
             role: "user",
@@ -129,6 +136,7 @@ export default async function handler(req: any, res: any) {
 
     if (!response.ok) {
       const text = await response.text();
+
       return sendJson(res, 500, {
         ok: false,
         error: "OPENAI_ERROR",
@@ -142,7 +150,7 @@ export default async function handler(req: any, res: any) {
     let parsed: AnalysisResult;
 
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(content) as AnalysisResult;
     } catch {
       return sendJson(res, 500, {
         ok: false,
@@ -153,13 +161,16 @@ export default async function handler(req: any, res: any) {
 
     return sendJson(res, 200, {
       ok: true,
-      analysis: parsed,
+      analysis: {
+        criteriaResults: normalizeCriteriaResults(parsed.criteriaResults),
+      },
+      usage: data?.usage ?? null,
     });
   } catch (err: any) {
     return sendJson(res, 500, {
       ok: false,
       error: err?.name === "AbortError" ? "TIMEOUT" : "UNKNOWN_ERROR",
-      message: err?.message ?? "Unknown error",
+      message: err?.message ?? "Unbekannter Fehler.",
     });
   }
 }
@@ -175,27 +186,38 @@ function buildPrompt(input: {
   return `
 Analysiere den Schülertext strikt anhand eines Bewertungsrasters.
 
----
+KONTEXT:
+Fach: ${input.subject || "nicht angegeben"}
+Jahrgang/Klasse: ${input.gradeLevel || "nicht angegeben"}
+Aufgabenart: ${input.taskType || "nicht angegeben"}
+
+AUFGABENSTELLUNG:
+${input.assignmentText || "Keine separate Aufgabenstellung übergeben."}
 
 ERWARTUNGSHORIZONT:
 ${input.expectationHorizonText}
 
----
-
 SCHÜLERTEXT:
 ${input.sanitizedText}
 
----
-
 AUFGABE:
+1. Extrahiere Bewertungskriterien aus dem Erwartungshorizont.
+2. Vergleiche den Schülertext mit jedem Kriterium.
+3. Bewerte jedes Kriterium einzeln.
 
-1. Extrahiere Bewertungskriterien
-2. Vergleiche den Text mit jedem Kriterium
-3. Bewerte jedes Kriterium einzeln
+REGELN:
+- Erfinde keine neuen Kriterien.
+- Vergib keine Note.
+- Vergib keine Punkte.
+- Keine personenbezogenen Daten.
+- Jede Bewertung muss an ein konkretes Kriterium gebunden sein.
+- Wenn ein Kriterium nicht sicher prüfbar ist, schreibe "teilweise" oder "nicht erfüllt" nur bei klarer Grundlage.
+- Keine allgemeinen Floskeln.
+- Kein Coaching-Ton.
+- Keine Fragen an Schüler*innen.
+- Maximal 15 Kriterien.
 
----
-
-Gib ausschließlich JSON zurück:
+Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
 
 {
   "criteriaResults": [
@@ -207,5 +229,54 @@ Gib ausschließlich JSON zurück:
     }
   ]
 }
+
+AUSGABEREGELN:
+- Kein Markdown.
+- Kein Text außerhalb des JSON.
+- comment ist maximal ein kurzer Satz.
 `;
+}
+
+function normalizeCriteriaResults(input: unknown): CriteriaResult[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((item) => {
+      const raw = item as Partial<CriteriaResult>;
+
+      return {
+        criterion: String(raw.criterion ?? "").trim(),
+        status: normalizeStatus(raw.status),
+        comment: String(raw.comment ?? "").trim(),
+        confidence: normalizeConfidence(raw.confidence),
+      };
+    })
+    .filter((item) => item.criterion || item.comment)
+    .slice(0, 15);
+}
+
+function normalizeStatus(value: unknown): CriteriaResult["status"] {
+  const normalized = String(value ?? "").trim();
+
+  if (
+    normalized === "erfüllt" ||
+    normalized === "teilweise" ||
+    normalized === "nicht erfüllt"
+  ) {
+    return normalized;
+  }
+
+  return "teilweise";
+}
+
+function normalizeConfidence(value: unknown): CriteriaResult["confidence"] {
+  const normalized = String(value ?? "").trim();
+
+  if (normalized === "hoch" || normalized === "mittel" || normalized === "niedrig") {
+    return normalized;
+  }
+
+  return "niedrig";
 }
