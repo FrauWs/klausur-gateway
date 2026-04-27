@@ -1,69 +1,62 @@
 // api/extractCriteria.ts
 
-export const config = {
-  runtime: "edge",
+declare const process: {
+  env: {
+    OPENAI_API_KEY?: string;
+  };
 };
 
-type Body = {
-  expectationHorizonText?: string;
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-export default async function handler(req: Request): Promise<Response> {
+function applyCors(res: any) {
+  Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
+}
+
+function sendJson(res: any, status: number, payload: unknown) {
+  applyCors(res);
+  res.setHeader("Content-Type", "application/json");
+  return res.status(status).json(payload);
+}
+
+export default async function handler(req: any, res: any) {
+  applyCors(res);
+
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      headers: corsHeaders(),
-    });
+    return res.status(200).end();
   }
 
   if (req.method !== "POST") {
-    return json(
-      { ok: false, error: "METHOD_NOT_ALLOWED" },
-      405
-    );
+    return sendJson(res, 405, {
+      ok: false,
+      error: "METHOD_NOT_ALLOWED",
+    });
   }
 
   try {
-    const body = (await req.json()) as Body;
-
+    const body = req.body ?? {};
     const text = String(body.expectationHorizonText ?? "").trim();
 
     if (!text) {
-      return json(
-        { ok: false, error: "MISSING_EXPECTATION_HORIZON" },
-        400
-      );
+      return sendJson(res, 400, {
+        ok: false,
+        error: "MISSING_EXPECTATION_HORIZON",
+      });
     }
 
-    const apiKey = (globalThis as any)?.process?.env?.OPENAI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
 
     if (!apiKey) {
-      return json(
-        { ok: false, error: "MISSING_API_KEY" },
-        500
-      );
+      return sendJson(res, 500, {
+        ok: false,
+        error: "MISSING_API_KEY",
+      });
     }
 
-    const prompt = `
-Extrahiere ein klares Bewertungsraster.
-
-TEXT:
-${text}
-
-Gib nur JSON zurück:
-
-{
-  "criteria": [
-    {
-      "area": "string",
-      "name": "string",
-      "expectedElements": ["string"],
-      "weighting": "string"
-    }
-  ]
-}
-`;
-
-    const openai = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -76,50 +69,50 @@ Gib nur JSON zurück:
         messages: [
           {
             role: "system",
-            content: "Extrahiere nur Kriterien. Kein Zusatztext.",
+            content: "Extrahiere Bewertungskriterien. Nur JSON.",
           },
           {
             role: "user",
-            content: prompt,
+            content: `
+Extrahiere ein Bewertungsraster.
+
+TEXT:
+${text}
+
+FORMAT:
+
+{
+  "criteria": [
+    {
+      "area": "string",
+      "name": "string",
+      "expectedElements": ["string"],
+      "weighting": "string"
+    }
+  ]
+}
+`,
           },
         ],
       }),
     });
 
-    if (!openai.ok) {
-      const err = await openai.text();
-      return json({ ok: false, error: err }, 500);
+    if (!response.ok) {
+      const err = await response.text();
+      return sendJson(res, 500, { ok: false, error: err });
     }
 
-    const data = await openai.json();
+    const data = await response.json();
     const content = data?.choices?.[0]?.message?.content ?? "{}";
 
-    return json({
+    return sendJson(res, 200, {
       ok: true,
       criteria: JSON.parse(content).criteria ?? [],
     });
   } catch (e: any) {
-    return json(
-      { ok: false, error: e?.message ?? "UNKNOWN_ERROR" },
-      500
-    );
+    return sendJson(res, 500, {
+      ok: false,
+      error: e?.message ?? "UNKNOWN_ERROR",
+    });
   }
-}
-
-function json(data: any, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders(),
-    },
-  });
-}
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  };
 }
