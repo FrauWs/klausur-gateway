@@ -9,14 +9,14 @@ type AnalyzeRequestBody = {
   taskType?: string;
 };
 
-type MarginComments = {
-  aufgabenbezug: string[];
-  inhalt: string[];
-  fachlichkeit: string[];
-  materialbezug: string[];
-  argumentation: string[];
-  struktur: string[];
-  spracheVorsichtig: string[];
+type CriterionResult = {
+  area: string;
+  criterion: string;
+  expectedElements: string[];
+  status: "erfuellt" | "teilweise" | "nicht_erfuellt" | "nicht_beurteilbar";
+  evidence: string;
+  comment: string;
+  confidence: "hoch" | "mittel" | "niedrig";
 };
 
 type AnalysisResult = {
@@ -25,16 +25,14 @@ type AnalysisResult = {
     gradeLevel?: string;
     taskType?: string;
   };
-  extractedExpectation?: {
-    taskType?: string;
-    operators?: string[];
-    criteria?: Array<{
-      name?: string;
-      expectedElements?: string[];
-      weighting?: string;
-    }>;
+  criteriaResults?: CriterionResult[];
+  marginComments?: {
+    staerken?: string[];
+    entwicklungsbedarf?: string[];
+    textbezug?: string[];
+    struktur?: string[];
+    spracheVorsichtig?: string[];
   };
-  marginComments?: Partial<MarginComments>;
   finalComment?: string;
   limitations?: {
     spellingAssessment?: string;
@@ -49,7 +47,9 @@ const corsHeaders = {
 };
 
 function applyCors(res: any) {
-  Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
+  Object.entries(corsHeaders).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
 }
 
 function sendJson(res: any, status: number, payload: unknown) {
@@ -57,23 +57,6 @@ function sendJson(res: any, status: number, payload: unknown) {
   res.setHeader("Content-Type", "application/json");
   return res.status(status).json(payload);
 }
-
-const FORBIDDEN_MARGIN_PHRASES = [
-  "aber",
-  "jedoch",
-  "insgesamt",
-  "grundsätzlich",
-  "zeigt",
-  "wirkt",
-  "könnte",
-  "teilweise",
-  "nachvollziehbar",
-  "weitgehend",
-  "argumentation wird analysiert",
-  "bewertung erfolgt",
-  "text wird dargestellt",
-  "es wird beschrieben",
-];
 
 export default async function handler(req: any, res: any) {
   applyCors(res);
@@ -104,6 +87,7 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "MISSING_SANITIZED_TEXT",
+        message: "sanitizedText fehlt.",
       });
     }
 
@@ -111,6 +95,7 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "MISSING_EXPECTATION_HORIZON",
+        message: "expectationHorizonText fehlt.",
       });
     }
 
@@ -120,6 +105,7 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 500, {
         ok: false,
         error: "MISSING_API_KEY",
+        message: "OPENAI_API_KEY ist nicht gesetzt.",
       });
     }
 
@@ -133,7 +119,7 @@ export default async function handler(req: any, res: any) {
     });
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 25000);
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -150,7 +136,7 @@ export default async function handler(req: any, res: any) {
           {
             role: "system",
             content:
-              "Du bist ein professioneller Korrekturassistent. Gib ausschließlich gültiges JSON zurück.",
+              "Du bist ein sachlicher Korrekturassistent für schulische Leistungsüberprüfungen. Du prüfst ausschließlich anhand des übergebenen Bewertungsrasters. Du gibst ausschließlich gültiges JSON zurück.",
           },
           {
             role: "user",
@@ -164,6 +150,7 @@ export default async function handler(req: any, res: any) {
 
     if (!response.ok) {
       const text = await response.text();
+
       return sendJson(res, 500, {
         ok: false,
         error: "OPENAI_ERROR",
@@ -177,7 +164,7 @@ export default async function handler(req: any, res: any) {
     let parsed: AnalysisResult;
 
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(content) as AnalysisResult;
     } catch {
       return sendJson(res, 500, {
         ok: false,
@@ -195,12 +182,13 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 200, {
       ok: true,
       analysis: cleanedAnalysis,
+      usage: data?.usage ?? null,
     });
   } catch (err: any) {
     return sendJson(res, 500, {
       ok: false,
       error: err?.name === "AbortError" ? "TIMEOUT" : "UNKNOWN_ERROR",
-      message: err?.message ?? "Unknown error",
+      message: err?.message ?? "Unbekannter Fehler.",
     });
   }
 }
@@ -213,16 +201,105 @@ function buildPrompt(input: {
   gradeLevel: string;
   taskType: string;
 }) {
+  const {
+    sanitizedText,
+    expectationHorizonText,
+    assignmentText,
+    subject,
+    gradeLevel,
+    taskType,
+  } = input;
+
   return `
-Analysiere den Schülertext anhand des Erwartungshorizonts.
+Analysiere einen anonymisierten Schülertext streng anhand eines Bewertungsrasters.
 
-TEXT:
-${input.sanitizedText}
+KONTEXT:
+Fach: ${subject || "nicht angegeben"}
+Jahrgang/Klasse: ${gradeLevel || "nicht angegeben"}
+Aufgabenart: ${taskType || "nicht angegeben"}
 
-ERWARTUNG:
-${input.expectationHorizonText}
+AUFGABENSTELLUNG:
+${assignmentText || "Keine separate Aufgabenstellung übergeben."}
 
-Gib nur JSON zurück.
+BEWERTUNGSRASTER / ERWARTUNGSHORIZONT:
+${expectationHorizonText}
+
+ANONYMISIERTER SCHÜLERTEXT:
+${sanitizedText}
+
+AUFGABE:
+Führe einen echten Rasterabgleich durch.
+
+WICHTIG:
+- Prüfe jedes erkennbare Kriterium aus dem Bewertungsraster einzeln.
+- Erfinde keine neuen Kriterien.
+- Wenn ein Kriterium im Schülertext nicht sicher prüfbar ist, markiere es als "nicht_beurteilbar".
+- Nenne keine Note.
+- Nenne keine Punkte.
+- Verwende keine personenbezogenen Daten.
+- Bewerte Rechtschreibung, Zeichensetzung und Grammatik nur vorsichtig, da der Text durch OCR/Texterkennung verfälscht sein kann.
+- Jede Rückmeldung muss auf Raster oder Schülertext bezogen sein.
+- Keine allgemeinen Floskeln.
+- Kein Coaching-Ton.
+- Keine Fragen an Schüler*innen.
+
+STATUS-LOGIK:
+- "erfuellt": Das Kriterium ist im Schülertext klar erfüllt.
+- "teilweise": Das Kriterium ist teilweise erkennbar, aber nicht vollständig umgesetzt.
+- "nicht_erfuellt": Das Kriterium fehlt oder ist fachlich nicht eingelöst.
+- "nicht_beurteilbar": Der Schülertext oder das Raster erlaubt keine sichere Aussage.
+
+EVIDENCE-LOGIK:
+- Wenn möglich, gib eine kurze Textstelle oder sinngemäße Fundstelle an.
+- Wenn keine Textstelle vorhanden ist, schreibe: "".
+- Erfinde keine Belege.
+
+COMMENT-LOGIK:
+- Formuliere kurz, sachlich und korrekturpraktisch.
+- Kein Lob ohne Bezug.
+- Kein Defizit ohne Bezug.
+- Maximal 1 Satz pro Kriterium.
+
+Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
+
+{
+  "context": {
+    "subject": "string",
+    "gradeLevel": "string",
+    "taskType": "string"
+  },
+  "criteriaResults": [
+    {
+      "area": "string",
+      "criterion": "string",
+      "expectedElements": ["string"],
+      "status": "erfuellt | teilweise | nicht_erfuellt | nicht_beurteilbar",
+      "evidence": "string",
+      "comment": "string",
+      "confidence": "hoch | mittel | niedrig"
+    }
+  ],
+  "marginComments": {
+    "staerken": ["string"],
+    "entwicklungsbedarf": ["string"],
+    "textbezug": ["string"],
+    "struktur": ["string"],
+    "spracheVorsichtig": ["string"]
+  },
+  "finalComment": "string",
+  "limitations": {
+    "spellingAssessment": "not_reliable_due_to_ocr",
+    "note": "string"
+  }
+}
+
+AUSGABEREGELN:
+- criteriaResults muss mindestens 5 Kriterien enthalten, wenn das Raster genug Material enthält.
+- Wenn das Raster weniger Kriterien enthält, prüfe nur diese.
+- finalComment umfasst 3 bis 5 sachliche Sätze.
+- finalComment fasst den Rasterabgleich zusammen.
+- Keine Markdown-Formatierung.
+- Kein Text außerhalb des JSON.
 `;
 }
 
@@ -236,51 +313,90 @@ function normalizeAnalysis(
 ): AnalysisResult {
   return {
     context: {
-      subject: parsed.context?.subject || fallbackContext.subject,
-      gradeLevel: parsed.context?.gradeLevel || fallbackContext.gradeLevel,
-      taskType: parsed.context?.taskType || fallbackContext.taskType,
+      subject: String(parsed.context?.subject || fallbackContext.subject || "").trim(),
+      gradeLevel: String(parsed.context?.gradeLevel || fallbackContext.gradeLevel || "").trim(),
+      taskType: String(parsed.context?.taskType || fallbackContext.taskType || "").trim(),
     },
-    extractedExpectation: parsed.extractedExpectation || {
-      taskType: "",
-      operators: [],
-      criteria: [],
-    },
+    criteriaResults: normalizeCriteriaResults(parsed.criteriaResults),
     marginComments: normalizeMarginComments(parsed.marginComments),
-    finalComment: parsed.finalComment || "",
-    limitations: parsed.limitations || {
+    finalComment: String(parsed.finalComment ?? "").trim(),
+    limitations: {
       spellingAssessment: "not_reliable_due_to_ocr",
-      note: "",
+      note:
+        String(parsed.limitations?.note ?? "").trim() ||
+        "Rechtschreibung, Zeichensetzung und einzelne sprachliche Auffälligkeiten sind auf OCR-Grundlage nicht zuverlässig abschließend bewertbar.",
     },
   };
+}
+
+function normalizeCriteriaResults(input: unknown): CriterionResult[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((item) => {
+      const raw = item as Partial<CriterionResult>;
+
+      return {
+        area: String(raw.area ?? "").trim(),
+        criterion: String(raw.criterion ?? "").trim(),
+        expectedElements: Array.isArray(raw.expectedElements)
+          ? raw.expectedElements.map((entry) => String(entry).trim()).filter(Boolean)
+          : [],
+        status: normalizeStatus(raw.status),
+        evidence: String(raw.evidence ?? "").trim(),
+        comment: String(raw.comment ?? "").trim(),
+        confidence: normalizeConfidence(raw.confidence),
+      };
+    })
+    .filter((item) => item.criterion || item.comment);
+}
+
+function normalizeStatus(value: unknown): CriterionResult["status"] {
+  const normalized = String(value ?? "").trim();
+
+  if (
+    normalized === "erfuellt" ||
+    normalized === "teilweise" ||
+    normalized === "nicht_erfuellt" ||
+    normalized === "nicht_beurteilbar"
+  ) {
+    return normalized;
+  }
+
+  return "nicht_beurteilbar";
+}
+
+function normalizeConfidence(value: unknown): CriterionResult["confidence"] {
+  const normalized = String(value ?? "").trim();
+
+  if (normalized === "hoch" || normalized === "mittel" || normalized === "niedrig") {
+    return normalized;
+  }
+
+  return "niedrig";
 }
 
 function normalizeMarginComments(
   input: AnalysisResult["marginComments"]
-): MarginComments {
-  const empty: MarginComments = {
-    aufgabenbezug: [],
-    inhalt: [],
-    fachlichkeit: [],
-    materialbezug: [],
-    argumentation: [],
-    struktur: [],
-    spracheVorsichtig: [],
-  };
-
-  if (!input) return empty;
-
+): NonNullable<AnalysisResult["marginComments"]> {
   return {
-    aufgabenbezug: clean(input.aufgabenbezug),
-    inhalt: clean(input.inhalt),
-    fachlichkeit: clean(input.fachlichkeit),
-    materialbezug: clean(input.materialbezug),
-    argumentation: clean(input.argumentation),
-    struktur: clean(input.struktur),
-    spracheVorsichtig: clean(input.spracheVorsichtig),
+    staerken: cleanStringArray(input?.staerken, 5),
+    entwicklungsbedarf: cleanStringArray(input?.entwicklungsbedarf, 5),
+    textbezug: cleanStringArray(input?.textbezug, 5),
+    struktur: cleanStringArray(input?.struktur, 5),
+    spracheVorsichtig: cleanStringArray(input?.spracheVorsichtig, 5),
   };
 }
 
-function clean(arr: unknown): string[] {
-  if (!Array.isArray(arr)) return [];
-  return arr.map((x) => String(x).trim()).filter(Boolean).slice(0, 4);
+function cleanStringArray(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => String(item ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, limit);
 }
