@@ -1,5 +1,11 @@
 // api/analyze.ts
 
+declare const process: {
+  env: {
+    OPENAI_API_KEY?: string;
+  };
+};
+
 type AnalyzeRequestBody = {
   sanitizedText?: string;
   expectationHorizonText?: string;
