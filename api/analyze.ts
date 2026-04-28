@@ -19,7 +19,7 @@ type CriteriaResult = {
   criterion: string;
   status: "erfüllt" | "teilweise" | "nicht erfüllt";
   comment: string;
-  evidence: string;
+  evidence: string; // <-- NEU: verpflichtender Textbeleg
   confidence: "hoch" | "mittel" | "niedrig";
 };
 
@@ -74,7 +74,6 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "MISSING_SANITIZED_TEXT",
-        message: "sanitizedText fehlt.",
       });
     }
 
@@ -82,7 +81,6 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "MISSING_EXPECTATION_HORIZON",
-        message: "expectationHorizonText fehlt.",
       });
     }
 
@@ -92,7 +90,6 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 500, {
         ok: false,
         error: "MISSING_API_KEY",
-        message: "OPENAI_API_KEY ist nicht gesetzt.",
       });
     }
 
@@ -123,7 +120,7 @@ export default async function handler(req: any, res: any) {
           {
             role: "system",
             content:
-              "Du bist ein sachlicher Korrekturassistent für schulische Leistungsüberprüfungen. Du gibst ausschließlich gültiges JSON zurück.",
+              "Du bist ein strenger Korrekturassistent. Jede Aussage muss durch eine konkrete Textstelle belegt sein. Ohne Beleg ist die Bewertung ungültig.",
           },
           {
             role: "user",
@@ -137,7 +134,6 @@ export default async function handler(req: any, res: any) {
 
     if (!response.ok) {
       const text = await response.text();
-
       return sendJson(res, 500, {
         ok: false,
         error: "OPENAI_ERROR",
@@ -187,14 +183,6 @@ function buildPrompt(input: {
   return `
 Analysiere den Schülertext strikt anhand eines Bewertungsrasters.
 
-KONTEXT:
-Fach: ${input.subject || "nicht angegeben"}
-Jahrgang/Klasse: ${input.gradeLevel || "nicht angegeben"}
-Aufgabenart: ${input.taskType || "nicht angegeben"}
-
-AUFGABENSTELLUNG:
-${input.assignmentText || "Keine separate Aufgabenstellung übergeben."}
-
 ERWARTUNGSHORIZONT:
 ${input.expectationHorizonText}
 
@@ -202,47 +190,33 @@ SCHÜLERTEXT:
 ${input.sanitizedText}
 
 AUFGABE:
-1. Extrahiere Bewertungskriterien aus dem Erwartungshorizont.
-2. Vergleiche den Schülertext mit jedem Kriterium.
-3. Bewerte jedes Kriterium einzeln.
-4. Belege jede Bewertung mit einer konkreten Fundstelle aus dem Schülertext.
+- Extrahiere Kriterien.
+- Prüfe jedes Kriterium einzeln.
+- BELEGE JEDE BEWERTUNG mit einer konkreten Textstelle.
 
 REGELN:
-- Erfinde keine neuen Kriterien.
-- Vergib keine Note.
-- Vergib keine Punkte.
-- Keine personenbezogenen Daten.
-- Jede Bewertung muss an ein konkretes Kriterium gebunden sein.
-- Jede Bewertung muss ein evidence-Feld enthalten.
-- evidence enthält eine kurze wörtliche Textstelle oder eine knappe sinngemäße Fundstelle aus dem Schülertext.
-- Wenn wirklich keine passende Fundstelle erkennbar ist, ist evidence ein leerer String.
-- Keine erfundenen Textbelege.
-- Wenn ein Kriterium nicht sicher prüfbar ist, schreibe "teilweise" oder "nicht erfüllt" nur bei klarer Grundlage.
-- Keine allgemeinen Floskeln.
-- Kein Coaching-Ton.
-- Keine Fragen an Schüler*innen.
-- Maximal 15 Kriterien.
+- Jede Bewertung MUSS ein direktes Zitat enthalten.
+- Zitate dürfen maximal 12 Wörter lang sein.
+- Zitate müssen exakt aus dem Schülertext stammen.
+- Wenn kein Beleg vorhanden ist:
+  → status = "nicht erfüllt"
+  → evidence = ""
+- Keine erfundenen Belege.
+- Kein allgemeines Urteil ohne Textstelle.
 
-Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
+FORMAT:
 
 {
   "criteriaResults": [
     {
       "criterion": "string",
       "status": "erfüllt | teilweise | nicht erfüllt",
-      "comment": "string",
-      "evidence": "string",
+      "comment": "kurzer fachlicher Befund",
+      "evidence": "konkrete Textstelle aus dem Schülertext",
       "confidence": "hoch | mittel | niedrig"
     }
   ]
 }
-
-AUSGABEREGELN:
-- Kein Markdown.
-- Kein Text außerhalb des JSON.
-- comment ist maximal ein kurzer Satz.
-- evidence ist maximal eine kurze Textstelle oder eine kurze sinngemäße Fundstelle.
-- evidence darf nur leer sein, wenn im Schülertext keine passende Fundstelle vorhanden ist.
 `;
 }
 
@@ -263,30 +237,18 @@ function normalizeCriteriaResults(input: unknown): CriteriaResult[] {
         confidence: normalizeConfidence(raw.confidence),
       };
     })
-    .filter((item) => item.criterion || item.comment || item.evidence)
+    .filter((item) => item.criterion)
     .slice(0, 15);
 }
 
 function normalizeStatus(value: unknown): CriteriaResult["status"] {
-  const normalized = String(value ?? "").trim();
-
-  if (
-    normalized === "erfüllt" ||
-    normalized === "teilweise" ||
-    normalized === "nicht erfüllt"
-  ) {
-    return normalized;
-  }
-
+  const v = String(value ?? "").trim();
+  if (v === "erfüllt" || v === "teilweise" || v === "nicht erfüllt") return v;
   return "teilweise";
 }
 
 function normalizeConfidence(value: unknown): CriteriaResult["confidence"] {
-  const normalized = String(value ?? "").trim();
-
-  if (normalized === "hoch" || normalized === "mittel" || normalized === "niedrig") {
-    return normalized;
-  }
-
+  const v = String(value ?? "").trim();
+  if (v === "hoch" || v === "mittel" || v === "niedrig") return v;
   return "niedrig";
 }
