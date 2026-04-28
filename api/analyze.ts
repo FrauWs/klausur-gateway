@@ -19,9 +19,8 @@ type CriteriaResult = {
   criterion: string;
   status: "erfüllt" | "teilweise" | "nicht erfüllt";
   comment: string;
-  evidence: string;
-  textEvidence: string;
   confidence: "hoch" | "mittel" | "niedrig";
+  textEvidence?: string;
 };
 
 type AnalysisResult = {
@@ -124,7 +123,7 @@ export default async function handler(req: any, res: any) {
           {
             role: "system",
             content:
-              "Du bist ein sachlicher Korrekturassistent für schulische Leistungsüberprüfungen. Alle Kommentare und Einschätzungen werden auf Deutsch formuliert. Textbelege bleiben unverändert in der Originalsprache des Schülertexts. Du gibst ausschließlich gültiges JSON zurück.",
+              "Du bist ein sachlicher Korrekturassistent für schulische Leistungsüberprüfungen. Du gibst ausschließlich gültiges JSON zurück.",
           },
           {
             role: "user",
@@ -185,16 +184,6 @@ function buildPrompt(input: {
   gradeLevel: string;
   taskType: string;
 }) {
-  const subjectLower = input.subject.toLowerCase();
-
-  const isForeignLanguage =
-    subjectLower.includes("englisch") ||
-    subjectLower.includes("französisch") ||
-    subjectLower.includes("spanisch") ||
-    subjectLower.includes("russisch") ||
-    subjectLower.includes("latein") ||
-    subjectLower.includes("fremdsprache");
-
   return `
 Analysiere den Schülertext strikt anhand eines Bewertungsrasters.
 
@@ -212,50 +201,44 @@ ${input.expectationHorizonText}
 SCHÜLERTEXT:
 ${input.sanitizedText}
 
-SPRACHE DER AUSGABE:
-- Alle Kommentare, Einschätzungen und Befunde werden auf Deutsch formuliert.
-- Textbelege werden unverändert in der Originalsprache des Schülertexts übernommen.
-- Textbelege dürfen nicht übersetzt werden.
-- Russische, englische, französische oder andere fremdsprachige Textstellen bleiben exakt in der Originalsprache.
-- Keine Übersetzung des gesamten Schülertexts.
-
-${
-  isForeignLanguage
-    ? `
-ZUSATZREGELN FÜR FREMDSPRACHEN:
-- Kommentare bleiben auf Deutsch.
-- Textbelege bleiben in der Originalsprache.
-- Bewerte Aufgabenbezug, Inhalt, Kohärenz, Ausdruck und sprachliche Angemessenheit nur anhand des Rasters.
-- Bei sprachlicher Bewertung vorsichtig formulieren, wenn OCR/Texterkennung beteiligt sein könnte.
-- Keine vollständige Fehlerkorrektur.
-- Keine Übersetzung der Schülerlösung.
-- Keine Korrektur einzelner fremdsprachiger Fehler, wenn diese nicht durch das Raster verlangt wird.
-`
-    : ""
-}
-
 AUFGABE:
-1. Extrahiere Bewertungskriterien aus dem Erwartungshorizont.
-2. Vergleiche den Schülertext mit jedem Kriterium.
-3. Bewerte jedes Kriterium einzeln.
-4. Belege jede Bewertung mit einer konkreten Fundstelle aus dem Schülertext.
+1. Extrahiere Bewertungskriterien ausschließlich aus dem Erwartungshorizont.
+2. Vergleiche den Schülertext systematisch mit jedem einzelnen Kriterium.
+3. Bewerte jedes Kriterium einzeln und unabhängig voneinander.
+
+WICHTIG:
+- Der Schülertext kann in einer Fremdsprache verfasst sein.
+- Die Kommentare müssen IMMER auf Deutsch formuliert werden.
+- Textbelege müssen IMMER im Original (Sprache des Schülertextes) stehen.
+
+STRUKTUR- UND REIHENFOLGENPRÜFUNG:
+- Prüfe nicht nur, ob ein Aspekt vorkommt, sondern auch, ob er an der passenden Stelle steht.
+- Unterscheide ausdrücklich:
+  1. Interpretationshypothese: steht vor der Analyse und eröffnet die Deutung.
+  2. Fazit/Schlussdeutung: steht am Ende und bündelt die Ergebnisse.
+- Eine Schlussdeutung ersetzt KEINE Interpretationshypothese.
+- Eine Interpretationshypothese ersetzt KEIN Fazit.
+- Prüfe die Darstellungsform:
+  - linear (Textverlauf)
+  - aspektorientiert (thematische Ordnung)
+- Wenn Struktur fehlerhaft oder unklar ist → im Kommentar benennen.
+- Wenn ein Kriterium vorhanden ist, aber an falscher Stelle steht → maximal "teilweise".
+
+TEXTBELEG-PFLICHT:
+- Jedes Kriterium MUSS, wenn möglich, mit einer konkreten Textstelle belegt werden.
+- Der Textbeleg muss exakt aus dem Schülertext stammen.
+- Kein Paraphrasieren.
+- Wenn kein klarer Beleg vorhanden ist → confidence = "niedrig".
 
 REGELN:
 - Erfinde keine neuen Kriterien.
-- Vergib keine Note.
-- Vergib keine Punkte.
-- Keine personenbezogenen Daten.
-- Jede Bewertung muss an ein konkretes Kriterium gebunden sein.
-- Jede Bewertung muss ein evidence-Feld enthalten.
-- evidence enthält eine kurze wörtliche Textstelle oder eine knappe sinngemäße Fundstelle aus dem Schülertext.
-- textEvidence enthält denselben Wert wie evidence.
-- Wenn wirklich keine passende Fundstelle erkennbar ist, sind evidence und textEvidence leere Strings.
-- Keine erfundenen Textbelege.
-- Wenn ein Kriterium nicht sicher prüfbar ist, schreibe "teilweise" oder "nicht erfüllt" nur bei klarer Grundlage.
-- Keine allgemeinen Floskeln.
+- Maximal 15 Kriterien.
+- Keine Noten.
+- Keine Punkte.
+- Keine Floskeln.
 - Kein Coaching-Ton.
 - Keine Fragen an Schüler*innen.
-- Maximal 15 Kriterien.
+- Jede Bewertung muss klar begründet sein.
 
 Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
 
@@ -264,10 +247,9 @@ Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
     {
       "criterion": "string",
       "status": "erfüllt | teilweise | nicht erfüllt",
-      "comment": "deutscher Kommentar",
-      "evidence": "Textbeleg in Originalsprache",
-      "textEvidence": "Textbeleg in Originalsprache",
-      "confidence": "hoch | mittel | niedrig"
+      "comment": "string",
+      "confidence": "hoch | mittel | niedrig",
+      "textEvidence": "string"
     }
   ]
 }
@@ -275,11 +257,8 @@ Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
 AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
-- comment ist immer auf Deutsch.
 - comment ist maximal ein kurzer Satz.
-- evidence ist maximal eine kurze Textstelle oder eine kurze sinngemäße Fundstelle.
-- evidence darf nur leer sein, wenn im Schülertext keine passende Fundstelle vorhanden ist.
-- textEvidence muss denselben Inhalt wie evidence haben.
+- textEvidence ist ein kurzer, exakter Ausschnitt aus dem Schülertext.
 `;
 }
 
@@ -291,22 +270,16 @@ function normalizeCriteriaResults(input: unknown): CriteriaResult[] {
   return input
     .map((item) => {
       const raw = item as Partial<CriteriaResult>;
-      const evidence = String(
-        raw.evidence ??
-          raw.textEvidence ??
-          ""
-      ).trim();
 
       return {
         criterion: String(raw.criterion ?? "").trim(),
         status: normalizeStatus(raw.status),
         comment: String(raw.comment ?? "").trim(),
-        evidence,
-        textEvidence: evidence,
         confidence: normalizeConfidence(raw.confidence),
+        textEvidence: String(raw.textEvidence ?? "").trim(),
       };
     })
-    .filter((item) => item.criterion || item.comment || item.evidence)
+    .filter((item) => item.criterion || item.comment)
     .slice(0, 15);
 }
 
