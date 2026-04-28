@@ -19,6 +19,7 @@ type CriteriaResult = {
   criterion: string;
   status: "erfüllt" | "teilweise" | "nicht erfüllt";
   comment: string;
+  evidence: string;
   confidence: "hoch" | "mittel" | "niedrig";
 };
 
@@ -204,6 +205,7 @@ AUFGABE:
 1. Extrahiere Bewertungskriterien aus dem Erwartungshorizont.
 2. Vergleiche den Schülertext mit jedem Kriterium.
 3. Bewerte jedes Kriterium einzeln.
+4. Belege jede Bewertung mit einer konkreten Fundstelle aus dem Schülertext.
 
 REGELN:
 - Erfinde keine neuen Kriterien.
@@ -211,6 +213,10 @@ REGELN:
 - Vergib keine Punkte.
 - Keine personenbezogenen Daten.
 - Jede Bewertung muss an ein konkretes Kriterium gebunden sein.
+- Jede Bewertung muss ein evidence-Feld enthalten.
+- evidence enthält eine kurze wörtliche Textstelle oder eine knappe sinngemäße Fundstelle aus dem Schülertext.
+- Wenn wirklich keine passende Fundstelle erkennbar ist, ist evidence ein leerer String.
+- Keine erfundenen Textbelege.
 - Wenn ein Kriterium nicht sicher prüfbar ist, schreibe "teilweise" oder "nicht erfüllt" nur bei klarer Grundlage.
 - Keine allgemeinen Floskeln.
 - Kein Coaching-Ton.
@@ -225,6 +231,7 @@ Gib ausschließlich gültiges JSON in exakt dieser Struktur zurück:
       "criterion": "string",
       "status": "erfüllt | teilweise | nicht erfüllt",
       "comment": "string",
+      "evidence": "string",
       "confidence": "hoch | mittel | niedrig"
     }
   ]
@@ -234,6 +241,8 @@ AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
 - comment ist maximal ein kurzer Satz.
+- evidence ist maximal eine kurze Textstelle oder eine kurze sinngemäße Fundstelle.
+- evidence darf nur leer sein, wenn im Schülertext keine passende Fundstelle vorhanden ist.
 `;
 }
 
@@ -250,10 +259,11 @@ function normalizeCriteriaResults(input: unknown): CriteriaResult[] {
         criterion: String(raw.criterion ?? "").trim(),
         status: normalizeStatus(raw.status),
         comment: String(raw.comment ?? "").trim(),
+        evidence: String(raw.evidence ?? "").trim(),
         confidence: normalizeConfidence(raw.confidence),
       };
     })
-    .filter((item) => item.criterion || item.comment)
+    .filter((item) => item.criterion || item.comment || item.evidence)
     .slice(0, 15);
 }
 
