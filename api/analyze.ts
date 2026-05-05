@@ -25,6 +25,14 @@ type NormalizedResult = {
   confidence: "hoch" | "mittel" | "niedrig";
 };
 
+type NormalizedMarginComment = {
+  criterion: string;
+  category: string;
+  severity: "positiv" | "neutral" | "kritisch";
+  textEvidence: string;
+  comment: string;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -192,11 +200,17 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    const marginComments = normalizeMarginComments(modelJson?.marginComments, normalized);
+    const gutachten = clean(modelJson?.gutachten ?? modelJson?.summary?.gutachten ?? "");
+
     return sendJson(res, 200, {
       ok: true,
       analysis: {
         criteriaResults: normalized,
         rasterabgleich: normalized,
+        marginComments,
+        randkommentare: marginComments,
+        gutachten,
       },
       languageHints: Array.isArray(modelJson?.languageHints)
         ? modelJson.languageHints
@@ -215,20 +229,57 @@ export default async function handler(req: any, res: any) {
 }
 
 const SYSTEM_PROMPT = `
-Du analysierst Schülertexte anhand eines Bewertungsrasters.
+Du analysierst Schülertexte anhand eines konkreten Bewertungsrasters.
 
 Du arbeitest ausschließlich kriteriumsbasiert.
-Du gibst keine Note.
+Du erfindest keine Kriterien.
+Du vergibst keine Note.
 Du vergibst keine Punkte.
-Du triffst kein Gesamturteil.
-Du formulierst Kommentare immer auf Deutsch.
-Textbelege bleiben in der Originalsprache des Schülertexts.
+Du gibst keine Prozentwerte aus.
 
-Du darfst keine Kriterien erfinden.
-Du darfst keine freien Bewertungen ergänzen.
-Du darfst keine pädagogischen Ratschläge geben.
+WICHTIG:
+Randkommentare dürfen und müssen bewertend sein.
+Das Gutachten wird aus den Randkommentaren und Rasterbefunden abgeleitet.
+Ein Gutachten darf nicht frei erfunden werden.
+Ein Gutachten darf keine neuen Aspekte enthalten, die nicht vorher in Rasterbefunden oder Randkommentaren erscheinen.
 
-Jedes Ergebnis muss sich auf ein konkretes Kriterium aus dem Erwartungshorizont beziehen.
+FORMULIERUNGSLOGIK FÜR OBERSTUFE / ABITUR:
+Nutze für Randkommentare und Gutachten einen sachlichen, standardisierten Oberstufen-Ton.
+
+Orientiere dich sprachlich an solchen Bewertungsachsen:
+- Textverständnis: differenziert / weitgehend richtig / im Allgemeinen sachlich korrekt / noch korrekt mit Ungenauigkeiten / nur ansatzweise / nicht nachgewiesen
+- Erfassen geforderter Aspekte: fokussiert / überwiegend korrekt / teilweise korrekt / nur ansatzweise / nicht erfasst
+- Gedankenführung: stringent und strukturiert / weitgehend strukturiert / in Ansätzen strukturiert / nicht nachvollziehbar
+- Textbezug: durchgängig treffend / fast durchgängig korrekt / teilweise ungenau / oberflächlich / häufig unzutreffend / kein zutreffender Textbezug
+- Analyse: sachgemäßer Aufbau, Deutung spezifischer Gestaltungsmittel, Genauigkeit des Textbezugs
+- Argumentation: nachvollziehbar, differenziert, widerspruchsfrei, belegt
+- Sprachmittlung / Gestaltung: Adressatenbezug, Textaufbau, Materialbezug
+
+Diese Formulierungen sind KEIN Raster.
+Sie dienen nur als standardisierte Sprache für Randkommentare und Gutachten.
+
+Randkommentare:
+- beziehen sich auf konkrete Kriterien
+- enthalten einen konkreten Textbeleg, wenn vorhanden
+- benennen sachlich, ob ein Aspekt klar, weitgehend, teilweise, kaum oder nicht erkennbar ist
+- dürfen bewertend formulieren
+- dürfen nicht bloß beschreiben
+- dürfen keine Note enthalten
+- dürfen keine Punkte enthalten
+
+Gutachten:
+- entsteht ausschließlich aus den Rasterbefunden und Randkommentaren
+- ist ein zusammenhängender sachlicher Text
+- benennt inhaltliche Leistung und Darstellungsleistung, soweit aus den Befunden ableitbar
+- verwendet keine automatische Note
+- verwendet keine automatische Punktzahl
+- enthält keine pädagogischen Ratschläge
+- enthält keine direkte Ansprache
+
+Textbelege:
+- bleiben in der Originalsprache des Schülertexts
+- werden nicht übersetzt
+- werden nicht erfunden
 
 Erlaubte Statuswerte:
 - klar vorhanden
@@ -273,7 +324,13 @@ ${input.sanitizedText}
 AUFGABE:
 1. Nutze ausschließlich die Kriterien aus dem Bewertungsraster.
 2. Prüfe jedes Kriterium einzeln gegen den Schülertext.
-3. Gib zu jedem Kriterium einen Status, einen kurzen deutschen Hinweis, einen Textbeleg und eine Sicherheit zurück.
+3. Gib zu jedem Kriterium:
+   - Status
+   - kurzen deutschen Hinweis
+   - Textbeleg
+   - Sicherheit
+4. Erzeuge anschließend bewertende Randkommentare.
+5. Leite daraus ein sachliches Gutachten ab.
 
 TEXTBELEG:
 - textEvidence muss ein kurzer Ausschnitt aus dem Schülertext sein.
@@ -285,6 +342,24 @@ STRUKTUR:
 - Beachte bei Kriterien zur Reihenfolge, ob der Aspekt an der passenden Stelle steht.
 - Eine Interpretationshypothese vor der Analyse ist nicht dasselbe wie eine Schlussdeutung am Ende.
 - Wenn ein Aspekt inhaltlich vorkommt, aber strukturell falsch platziert ist, maximal "teilweise vorhanden".
+
+RANDKOMMENTARE:
+- Randkommentare müssen bewertend sein.
+- Sie sollen aus dem Rasterabgleich ableitbar sein.
+- Sie dürfen standardisierte Oberstufenformulierungen nutzen.
+- Sie müssen knapp, konkret und fachlich sein.
+- Sie dürfen keine Noten oder Punkte enthalten.
+- Sie dürfen keine direkte Anrede enthalten.
+- Sie dürfen nicht als bloße Beschreibung formuliert sein.
+
+GUTACHTEN:
+- Das Gutachten muss aus den Randkommentaren ableitbar sein.
+- Es darf keine neuen Befunde enthalten.
+- Es soll die zentralen Befunde bündeln.
+- Es soll in Oberstufen-/Abitur-Ton formuliert sein.
+- Keine Note.
+- Keine Punkte.
+- Keine Prozentwerte.
 
 Gib ausschließlich JSON in exakt dieser Struktur zurück:
 
@@ -298,6 +373,16 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
       "confidence": "hoch | mittel | niedrig"
     }
   ],
+  "marginComments": [
+    {
+      "criterion": "Name des Kriteriums aus dem Raster",
+      "category": "Textverständnis | Analyse | Textbezug | Gedankenführung | Sprache | Struktur | Darstellung | Sonstiges",
+      "severity": "positiv | neutral | kritisch",
+      "textEvidence": "kurzer Originalausschnitt aus dem Schülertext oder leer",
+      "comment": "bewertender Randkommentar auf Deutsch"
+    }
+  ],
+  "gutachten": "zusammenhängendes Gutachten auf Deutsch",
   "languageHints": []
 }
 
@@ -351,6 +436,38 @@ function normalizeResults(input: any[]): NormalizedResult[] {
     .filter((item) => item.criterion || item.comment);
 }
 
+function normalizeMarginComments(input: any, fallbackResults: NormalizedResult[]): NormalizedMarginComment[] {
+  const raw = Array.isArray(input) ? input : [];
+
+  const normalized = raw
+    .map((item: any, index: number) => {
+      const criterion = clean(item?.criterion ?? item?.kriterium ?? `Kriterium ${index + 1}`);
+      const category = clean(item?.category ?? item?.bereich ?? "Sonstiges") || "Sonstiges";
+      const severity = normalizeSeverity(item?.severity);
+      const textEvidence = clean(item?.textEvidence ?? item?.evidence ?? item?.textbeleg ?? "");
+      const comment = clean(item?.comment ?? item?.hinweis ?? "");
+
+      return {
+        criterion,
+        category,
+        severity,
+        textEvidence,
+        comment,
+      };
+    })
+    .filter((item: NormalizedMarginComment) => item.criterion && item.comment);
+
+  if (normalized.length > 0) return normalized;
+
+  return fallbackResults.map((result) => ({
+    criterion: result.criterion,
+    category: "Sonstiges",
+    severity: severityFromStatus(result.status),
+    textEvidence: result.textEvidence,
+    comment: result.comment || result.hinweis,
+  }));
+}
+
 function normalizeStatus(value: unknown): string {
   const raw = clean(value).toLowerCase();
 
@@ -365,7 +482,6 @@ function normalizeStatus(value: unknown): string {
   if (raw.includes("teilweise")) return "teilweise vorhanden";
   if (raw.includes("kaum")) return "kaum erkennbar";
   if (raw.includes("nicht")) return "nicht erkennbar";
-
   if (raw.includes("erfüllt")) return "weitgehend vorhanden";
 
   return "teilweise vorhanden";
@@ -379,6 +495,22 @@ function normalizeConfidence(value: unknown): "hoch" | "mittel" | "niedrig" {
   if (raw === "niedrig") return "niedrig";
 
   return "mittel";
+}
+
+function normalizeSeverity(value: unknown): "positiv" | "neutral" | "kritisch" {
+  const raw = clean(value).toLowerCase();
+
+  if (raw === "positiv") return "positiv";
+  if (raw === "kritisch") return "kritisch";
+  return "neutral";
+}
+
+function severityFromStatus(status: string): "positiv" | "neutral" | "kritisch" {
+  const raw = status.toLowerCase();
+
+  if (raw.includes("klar") || raw.includes("weitgehend")) return "positiv";
+  if (raw.includes("kaum") || raw.includes("nicht")) return "kritisch";
+  return "neutral";
 }
 
 function clean(value: unknown): string {
