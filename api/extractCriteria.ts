@@ -1,6 +1,7 @@
 // api/extractCriteria.ts
 
 import { z } from "zod";
+import crypto from "crypto";
 
 declare const process: {
   env: {
@@ -15,17 +16,26 @@ type ExtractCriteriaRequestBody = {
   fileName?: string;
 };
 
+const ExpectedElementSchema = z.object({
+  id: z.string().optional(),
+  label: z.string().optional(),
+  erwartung: z.string(),
+  erfüllt: z.boolean().optional(),
+  kommentar: z.string().optional(),
+});
+
+const CriterionSchema = z.object({
+  bereich: z.string(),
+  kriterium: z.string(),
+  beschreibung: z.string(),
+  erwartung: z.string(),
+  expectedElements: z.array(ExpectedElementSchema).optional(),
+  gewichtung: z.string().optional(),
+  aktiv: z.boolean().optional(),
+});
+
 const CriteriaSchema = z.object({
-  criteria: z.array(
-    z.object({
-      bereich: z.string(),
-      kriterium: z.string(),
-      beschreibung: z.string(),
-      erwartung: z.string(),
-      gewichtung: z.string().optional(),
-      aktiv: z.boolean().optional(),
-    }),
-  ),
+  criteria: z.array(CriterionSchema),
 });
 
 const corsHeaders = {
@@ -46,6 +56,10 @@ function sendJson(res: any, status: number, payload: unknown) {
   return res.status(status).json(payload);
 }
 
+function createId() {
+  return crypto.randomUUID();
+}
+
 export default async function handler(req: any, res: any) {
   applyCors(res);
 
@@ -63,7 +77,9 @@ export default async function handler(req: any, res: any) {
   try {
     const body = (req.body ?? {}) as ExtractCriteriaRequestBody;
 
-    const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
+    const expectationHorizonText = String(
+      body.expectationHorizonText ?? "",
+    ).trim();
     const imageBase64 = String(body.imageBase64 ?? "").trim();
     const imageMimeType = String(body.imageMimeType ?? "").trim();
     const fileName = String(body.fileName ?? "").trim();
@@ -89,7 +105,8 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "UNSUPPORTED_FILE_TYPE",
-        message: "Für die Rastererkennung werden aktuell nur Bilder, Text, Excel oder CSV unterstützt.",
+        message:
+          "Für die Rastererkennung werden aktuell nur Bilder, Text, Excel oder CSV unterstützt.",
       });
     }
 
@@ -178,21 +195,54 @@ export default async function handler(req: any, res: any) {
     const criteria = result.data.criteria
       .map((criterion, index) => {
         const bereich = clean(criterion.bereich) || "Allgemein";
-        const kriterium = clean(criterion.kriterium) || `Kriterium ${index + 1}`;
+        const kriterium =
+          clean(criterion.kriterium) || `Kriterium ${index + 1}`;
         const erwartung = clean(criterion.erwartung);
         const beschreibung = clean(criterion.beschreibung);
 
+        const expectedElements =
+          criterion.expectedElements && criterion.expectedElements.length > 0
+            ? criterion.expectedElements.map((element, elementIndex) => ({
+                id: createId(),
+                label:
+                  clean(element.label) ||
+                  `Teilerwartung ${elementIndex + 1}`,
+                erwartung: clean(element.erwartung),
+                erfüllt: element.erfüllt ?? false,
+                kommentar: clean(element.kommentar ?? ""),
+              }))
+            : [
+                {
+                  id: createId(),
+                  label: kriterium,
+                  erwartung: erwartung || beschreibung || kriterium,
+                  erfüllt: false,
+                  kommentar: "",
+                },
+              ];
+
         return {
-          id: `crit-${index}`,
+          id: createId(),
           bereich,
           kriterium,
-          beschreibung: buildConcreteDescription(beschreibung, erwartung, kriterium),
+          beschreibung: buildConcreteDescription(
+            beschreibung,
+            erwartung,
+            kriterium,
+          ),
           erwartung,
+          expectedElements,
           gewichtung: clean(criterion.gewichtung ?? ""),
           aktiv: criterion.aktiv !== false,
         };
       })
-      .filter((criterion) => criterion.kriterium || criterion.beschreibung || criterion.erwartung);
+      .filter(
+        (criterion) =>
+          criterion.kriterium ||
+          criterion.beschreibung ||
+          criterion.erwartung ||
+          criterion.expectedElements.length > 0,
+      );
 
     if (criteria.length === 0) {
       return sendJson(res, 500, {
@@ -235,7 +285,11 @@ function buildTextMessages(expectationHorizonText: string) {
   ];
 }
 
-function buildImageMessages(imageBase64: string, imageMimeType: string, fileName: string) {
+function buildImageMessages(
+  imageBase64: string,
+  imageMimeType: string,
+  fileName: string,
+) {
   return [
     {
       role: "system",
@@ -272,36 +326,10 @@ Du darfst nicht zusammenfassen.
 Du darfst nicht bündeln.
 Du darfst keine konkreten Inhalte weglassen.
 
-Entscheidend:
-Das Feld "erwartung" enthält immer den konkreten erwarteten Inhalt.
-Das Feld "beschreibung" enthält ebenfalls den konkreten Inhalt, nicht nur eine abstrakte Prüfformulierung.
-
-Verbotene Beschreibungen:
-- "Die Textsorte wird korrekt genannt."
-- "Der Titel wird korrekt genannt."
-- "Der Autor wird korrekt genannt."
-- "Das Entstehungsjahr wird korrekt genannt."
-- "Die Einleitung ist vollständig."
-- "Die lyrische Form wird beschrieben."
-- "Die Strophe wird analysiert."
-- "Der Text ist logisch aufgebaut."
-- "Der Text ist verständlich."
-
-Stattdessen:
-- "Die Textsorte wird als Gedicht benannt."
-- "Der Titel wird als Der Pflaumenbaum benannt."
-- "Bertolt Brecht wird als Autor genannt."
-- "1933 wird als Entstehungsjahr genannt."
-- "Das Thema wird als Beschreibung eines kleinen Pflaumenbaums benannt."
-- "Der Inhalt benennt, dass ein kleiner Pflaumenbaum in einem Hof steht und nicht weiterwachsen kann."
-- "Strophe 1 beschreibt den Pflaumenbaum als unglaublich klein."
-- "Strophe 1 nennt das Gitter um den Baum."
-- "Strophe 1 deutet das Gitter auch als Schutz vor Tritten."
-- "Strophe 2 erklärt, dass der Pflaumenbaum nicht weiterwachsen kann."
-- "Strophe 2 nennt zu wenig Sonne im Hof als Grund."
-- "Die verkürzten Wortformen 'wer'n' und 's ist' werden als sprachliche Auffälligkeiten benannt."
-
-Wenn im Raster konkrete Begriffe, Namen, Jahreszahlen, Textstellen, Zitate oder Inhalte stehen, müssen diese in "erwartung" erhalten bleiben.
+Wichtig:
+Jedes Kriterium braucht zusätzlich "expectedElements".
+"expectedElements" enthält kleinteilige Teilerwartungen.
+Jede Teilerwartung muss später einzeln für Randkommentare nutzbar sein.
 
 Gib ausschließlich gültiges JSON zurück.
 `;
@@ -310,70 +338,12 @@ function buildPrompt(text: string): string {
   return `
 Extrahiere aus dem folgenden Erwartungshorizont ein konkretes, kleinteiliges Bewertungsraster.
 
-ZENTRALE REGEL:
-Der konkrete Inhalt muss erhalten bleiben.
-Nicht nur die Kategorie, sondern der erwartete Inhalt muss ausgegeben werden.
-
-FALSCH:
-{
-  "kriterium": "Titel",
-  "beschreibung": "Der Titel wird korrekt genannt.",
-  "erwartung": ""
-}
-
-RICHTIG:
-{
-  "kriterium": "Titel",
-  "beschreibung": "Der Titel wird als Der Pflaumenbaum benannt.",
-  "erwartung": "Der Pflaumenbaum"
-}
-
-FALSCH:
-{
-  "kriterium": "Autor",
-  "beschreibung": "Der Autor wird korrekt genannt.",
-  "erwartung": ""
-}
-
-RICHTIG:
-{
-  "kriterium": "Autor",
-  "beschreibung": "Bertolt Brecht wird als Autor genannt.",
-  "erwartung": "Bertolt Brecht"
-}
-
-FALSCH:
-{
-  "kriterium": "Beschreibung Strophe 1",
-  "beschreibung": "Die erste Strophe wird beschrieben.",
-  "erwartung": ""
-}
-
-RICHTIG:
-{
-  "kriterium": "Strophe 1: Pflaumenbaum als unglaublich klein",
-  "beschreibung": "Die erste Strophe beschreibt den Pflaumenbaum als unglaublich klein.",
-  "erwartung": "Pflaumenbaum als unglaublich klein"
-}
-
 ATOMISIERUNG:
-- Jede einzelne Angabe wird ein eigenes Kriterium.
-- Jede konkrete Information wird erhalten.
-- Jeder Spiegelstrich wird ein eigenes Kriterium.
+- Jede einzelne Angabe wird ein eigenes Kriterium oder eine eigene Teilerwartung.
+- Jeder Spiegelstrich wird erhalten.
 - Aufzählungen nach Doppelpunkt werden aufgeteilt.
 - Beispiele, Zitate, Versangaben und sprachliche Auffälligkeiten werden nicht ausgelassen.
-- Strukturangaben wie Einleitung, Interpretationshypothese, Hauptteil, Fazit bleiben als eigene Kriterien erhalten, wenn sie im Raster vorkommen.
-- Wenn ein Strukturpunkt einen konkreten Inhalt enthält, muss dieser Inhalt in "erwartung" stehen.
-
-BEREICHE:
-Übernimm vorhandene Bereiche wie:
-- Verstehensleistung
-- Darstellungsleistung
-- Inhalt
-- Sprache
-- Aufbau
-
-Wenn kein Bereich erkennbar ist, nutze "Allgemein".
+- Strukturangaben wie Einleitung, Interpretationshypothese, Hauptteil, Fazit bleiben erhalten.
 
 TEXT ODER BILDINHALT:
 ${text}
@@ -387,24 +357,37 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
       "kriterium": "string",
       "beschreibung": "string",
       "erwartung": "string",
+      "expectedElements": [
+        {
+          "label": "string",
+          "erwartung": "string",
+          "erfüllt": false,
+          "kommentar": ""
+        }
+      ],
       "gewichtung": "string",
       "aktiv": true
     }
   ]
 }
 
-AUSGABEREGELN:
+REGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
 - Maximal 80 Kriterien.
 - "kriterium" ist kurz, aber konkret.
 - "beschreibung" enthält den konkreten erwarteten Inhalt.
 - "erwartung" enthält den konkreten Inhalt möglichst nah am Original.
-- Wenn der konkrete Inhalt nicht gelesen werden kann, schreibe in "erwartung": "nicht eindeutig lesbar".
+- "expectedElements" darf niemals leer sein.
+- Jede Teilerwartung in "expectedElements" muss kommentierbar sein.
 `;
 }
 
-function buildConcreteDescription(description: string, expectation: string, criterion: string): string {
+function buildConcreteDescription(
+  description: string,
+  expectation: string,
+  criterion: string,
+): string {
   const d = clean(description);
   const e = clean(expectation);
 
@@ -418,27 +401,7 @@ function buildConcreteDescription(description: string, expectation: string, crit
     return d;
   }
 
-  if (isGenericDescription(d)) {
-    return `${d} Erwartet: ${e}`;
-  }
-
-  return `${d} Erwartet: ${e}`;
-}
-
-function isGenericDescription(value: string): boolean {
-  const text = value.toLowerCase();
-
-  return (
-    text.includes("korrekt genannt") ||
-    text.includes("wird genannt") ||
-    text.includes("wird benannt") ||
-    text.includes("wird beschrieben") ||
-    text.includes("wird erklärt") ||
-    text.includes("wird erkannt") ||
-    text.includes("wird berücksichtigt") ||
-    text.includes("prüft, ob") ||
-    text.includes("soll")
-  );
+  return `${d} Erwartet: ${e}`.trim();
 }
 
 function clean(value: unknown): string {
