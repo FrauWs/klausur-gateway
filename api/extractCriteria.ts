@@ -2,177 +2,103 @@
 
 import OpenAI from "openai";
 
-type Req = {
-  method?: string;
-  body?: any;
-};
-
-type Res = {
-  status: (code: number) => Res;
-  json: (data: any) => void;
-  end: () => void;
-  setHeader: (key: string, value: string) => void;
-};
-
-function setCors(res: Res) {
+export default async function handler(req: any, res: any) {
+  // --- CORS ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
-
-function cleanJsonText(text: string): string {
-  return text
-    .trim()
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-}
-
-function normalizeCriteria(input: any) {
-  const rawCriteria = Array.isArray(input?.criteria) ? input.criteria : [];
-
-  return rawCriteria
-    .filter((item) => item && typeof item === "object")
-    .map((item, index) => ({
-      id: item.id || `criterion-${index + 1}`,
-      bereich: String(item.bereich || "Allgemein"),
-      kriterium: String(item.kriterium || item.title || `Kriterium ${index + 1}`),
-      beschreibung: String(item.beschreibung || ""),
-      erwartung: String(item.erwartung || ""),
-      gewichtung: String(item.gewichtung || ""),
-      aktiv: typeof item.aktiv === "boolean" ? item.aktiv : true,
-    }))
-    .filter((item) => item.kriterium.trim().length > 0);
-}
-
-export default async function handler(req: Req, res: Res) {
-  setCors(res);
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
-    return res.status(204).end();
+    return res.status(200).end();
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({
-      error: "Method not allowed. Use POST.",
-    });
+    return res.status(405).json({ error: "Only POST allowed" });
   }
 
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({
-        error: "OPENAI_API_KEY fehlt.",
-      });
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
     }
 
-    const body = req.body || {};
+    const { expectationHorizonText } = req.body || {};
 
-    const expectationHorizonText = String(body.expectationHorizonText || "").trim();
-    const imageBase64 = String(body.imageBase64 || "").trim();
-    const imageMimeType = String(body.imageMimeType || "image/png").trim();
-    const fileName = String(body.fileName || "Erwartungshorizont").trim();
-
-    if (!expectationHorizonText && !imageBase64) {
-      return res.status(400).json({
-        error: "Kein Erwartungshorizont übergeben.",
-      });
+    if (!expectationHorizonText) {
+      return res.status(400).json({ error: "No input text" });
     }
 
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    const systemPrompt = `
-Du extrahierst Bewertungskriterien aus einem schulischen Erwartungshorizont.
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `
+Extrahiere Bewertungskriterien aus einem Erwartungshorizont.
 
-Gib ausschließlich valides JSON zurück.
+Gib JSON zurück:
 
-Format:
 {
+  "summary": "2-4 Sätze Zusammenfassung",
   "criteria": [
     {
-      "bereich": "Inhalt / Analyse / Darstellung / Sprache / Transfer",
-      "kriterium": "Kurzer Kriterientitel",
-      "beschreibung": "Was wird bewertet?",
-      "erwartung": "Welche Leistung wird erwartet?",
-      "gewichtung": "hoch / mittel / gering / Prozentangabe / leer",
+      "bereich": "...",
+      "kriterium": "...",
+      "beschreibung": "...",
+      "erwartung": "...",
+      "gewichtung": "...",
       "aktiv": true
     }
   ]
 }
 
 Regeln:
-- Keine übertriebene Kleinteiligkeit.
-- Ähnliche Punkte zusammenfassen.
-- Normalerweise 8 bis 18 Kriterien.
-- Keine erfundenen Textdetails.
-- Keine Kommentare außerhalb des JSON.
-`.trim();
-
-    const userText = `
-Dateiname: ${fileName}
-
-Erwartungshorizont:
-${expectationHorizonText || "[Bildmaterial wurde übergeben.]"}
-`.trim();
-
-    const content: any[] = [{ type: "text", text: userText }];
-
-    if (imageBase64) {
-      content.push({
-        type: "image_url",
-        image_url: {
-          url: `data:${imageMimeType};base64,${imageBase64}`,
+- max. ca. 10–15 Kriterien
+- keine Mini-Zerlegung
+- keine Kommentare außerhalb JSON
+          `.trim(),
         },
-      });
-    }
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content },
+        {
+          role: "user",
+          content: expectationHorizonText,
+        },
       ],
     });
 
     const raw = completion.choices?.[0]?.message?.content;
 
     if (!raw) {
-      return res.status(502).json({
-        error: "Keine KI-Antwort erhalten.",
-      });
+      return res.status(500).json({ error: "No AI response" });
     }
 
-    let parsed: any;
-
+    let parsed;
     try {
-      parsed = JSON.parse(cleanJsonText(raw));
+      parsed = JSON.parse(raw);
     } catch {
-      return res.status(502).json({
-        error: "KI-Antwort war kein valides JSON.",
-        raw,
-      });
-    }
-
-    const criteria = normalizeCriteria(parsed);
-
-    if (criteria.length === 0) {
-      return res.status(502).json({
-        error: "Es konnten keine Kriterien extrahiert werden.",
-        raw: parsed,
-      });
+      return res.status(500).json({ error: "Invalid JSON from AI", raw });
     }
 
     return res.status(200).json({
-      criteria,
+      summary: parsed.summary || "",
+      criteria: (parsed.criteria || []).map((c: any, i: number) => ({
+        id: `criterion-${i + 1}`,
+        bereich: c.bereich || "",
+        kriterium: c.kriterium || "",
+        beschreibung: c.beschreibung || "",
+        erwartung: c.erwartung || "",
+        gewichtung: c.gewichtung || "",
+        aktiv: c.aktiv ?? true,
+      })),
     });
-  } catch (error) {
+  } catch (err: any) {
     return res.status(500).json({
-      error: "extractCriteria ist fehlgeschlagen.",
-      message: error instanceof Error ? error.message : String(error),
+      error: "Server error",
+      message: err.message,
     });
   }
 }
