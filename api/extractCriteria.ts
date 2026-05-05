@@ -15,6 +15,11 @@ type ExtractCriteriaRequestBody = {
   fileName?: string;
 };
 
+const ExpectedElementSchema = z.object({
+  label: z.string(),
+  erwartung: z.string(),
+});
+
 const CriteriaSchema = z.object({
   criteria: z.array(
     z.object({
@@ -22,6 +27,7 @@ const CriteriaSchema = z.object({
       kriterium: z.string(),
       beschreibung: z.string(),
       erwartung: z.string(),
+      expectedElements: z.array(ExpectedElementSchema).optional(),
       gewichtung: z.string().optional(),
       aktiv: z.boolean().optional(),
     }),
@@ -179,15 +185,17 @@ export default async function handler(req: any, res: any) {
       .map((criterion, index) => {
         const bereich = clean(criterion.bereich) || "Allgemein";
         const kriterium = clean(criterion.kriterium) || `Kriterium ${index + 1}`;
-        const erwartung = clean(criterion.erwartung);
+        const expectedElements = normalizeExpectedElements(criterion.expectedElements ?? []);
+        const erwartung = clean(criterion.erwartung) || expectedElementsToText(expectedElements);
         const beschreibung = clean(criterion.beschreibung);
 
         return {
           id: `crit-${index}`,
           bereich,
           kriterium,
-          beschreibung: buildConcreteDescription(beschreibung, erwartung, kriterium),
+          beschreibung: buildDescription(beschreibung, erwartung, expectedElements, kriterium),
           erwartung,
+          expectedElements,
           gewichtung: clean(criterion.gewichtung ?? ""),
           aktiv: criterion.aktiv !== false,
         };
@@ -249,7 +257,7 @@ function buildImageMessages(imageBase64: string, imageMimeType: string, fileName
           text: buildPrompt(
             `Das Bewertungsraster liegt als Bild vor. Dateiname: ${
               fileName || "unbekannt"
-            }. Lies den sichtbaren Text vollständig aus. Extrahiere ausschließlich die dort sichtbaren konkreten Erwartungen.`,
+            }. Lies den sichtbaren Text vollständig aus. Extrahiere daraus bewertbare Leistungseinheiten mit konkreten Untererwartungen.`,
           ),
         },
         {
@@ -266,104 +274,158 @@ function buildImageMessages(imageBase64: string, imageMimeType: string, fileName
 const SYSTEM_PROMPT = `
 Du extrahierst Bewertungsraster aus Erwartungshorizonten.
 
+Grundregel:
+Ein Kriterium ist eine bewertbare Leistungseinheit.
+Nicht jeder Unterpunkt ist automatisch ein eigenes Kriterium.
+
+Du unterscheidest:
+1. Kriterium = übergeordnete bewertbare Leistungseinheit
+2. expectedElements = konkrete Teilanforderungen innerhalb dieses Kriteriums
+
 Du darfst keine allgemeinen Kriterien erfinden.
 Du darfst keine pädagogischen Standardformulierungen erzeugen.
-Du darfst nicht zusammenfassen.
-Du darfst nicht bündeln.
 Du darfst keine konkreten Inhalte weglassen.
+Du darfst aber sinnvoll bündeln, wenn mehrere Unterpunkte gemeinsam eine einzige bewertbare Leistungseinheit bilden.
 
-Entscheidend:
-Das Feld "erwartung" enthält immer den konkreten erwarteten Inhalt.
-Das Feld "beschreibung" enthält ebenfalls den konkreten Inhalt, nicht nur eine abstrakte Prüfformulierung.
+Bündeln ist richtig bei:
+- vollständige Einleitung mit Textsorte, Titel, Autor, Entstehungsjahr, Thema, Inhalt
+- lyrische Form mit Strophenzahl, Verszahl, Reimschema
+- Beschreibung und Deutung einer einzelnen Strophe mit mehreren Unteraspekten
+- sprachliche Analyse einer Strophe mit mehreren genannten Beobachtungen
+- formale Analyse mit mehreren zusammengehörigen Formaspekten
 
-Verbotene Beschreibungen:
-- "Die Textsorte wird korrekt genannt."
-- "Der Titel wird korrekt genannt."
-- "Der Autor wird korrekt genannt."
-- "Das Entstehungsjahr wird korrekt genannt."
-- "Die Einleitung ist vollständig."
-- "Die lyrische Form wird beschrieben."
-- "Die Strophe wird analysiert."
-- "Der Text ist logisch aufgebaut."
-- "Der Text ist verständlich."
+Zerlegen ist richtig bei:
+- eigenständigen Analyseleistungen
+- getrennten Strophen
+- getrennten Aufgabenbereichen
+- getrennten großen Kompetenzbereichen
+- deutlich getrennten inhaltlichen Arbeitsschritten
 
-Stattdessen:
-- "Die Textsorte wird als Gedicht benannt."
-- "Der Titel wird als Der Pflaumenbaum benannt."
-- "Bertolt Brecht wird als Autor genannt."
-- "1933 wird als Entstehungsjahr genannt."
-- "Das Thema wird als Beschreibung eines kleinen Pflaumenbaums benannt."
-- "Der Inhalt benennt, dass ein kleiner Pflaumenbaum in einem Hof steht und nicht weiterwachsen kann."
-- "Strophe 1 beschreibt den Pflaumenbaum als unglaublich klein."
-- "Strophe 1 nennt das Gitter um den Baum."
-- "Strophe 1 deutet das Gitter auch als Schutz vor Tritten."
-- "Strophe 2 erklärt, dass der Pflaumenbaum nicht weiterwachsen kann."
-- "Strophe 2 nennt zu wenig Sonne im Hof als Grund."
-- "Die verkürzten Wortformen 'wer'n' und 's ist' werden als sprachliche Auffälligkeiten benannt."
-
-Wenn im Raster konkrete Begriffe, Namen, Jahreszahlen, Textstellen, Zitate oder Inhalte stehen, müssen diese in "erwartung" erhalten bleiben.
+Verboten:
+- aus "vollständige Einleitung" sechs Einzelkriterien machen
+- aus "lyrische Form" drei Einzelkriterien machen
+- generische Beschreibungen ohne konkrete Untererwartungen
+- konkrete Inhalte auslassen
+- Kriterien erfinden, die nicht im Raster stehen
 
 Gib ausschließlich gültiges JSON zurück.
 `;
 
 function buildPrompt(text: string): string {
   return `
-Extrahiere aus dem folgenden Erwartungshorizont ein konkretes, kleinteiliges Bewertungsraster.
+Extrahiere aus dem folgenden Erwartungshorizont ein Bewertungsraster.
 
-ZENTRALE REGEL:
-Der konkrete Inhalt muss erhalten bleiben.
-Nicht nur die Kategorie, sondern der erwartete Inhalt muss ausgegeben werden.
+ZENTRALE ENTSCHEIDUNG:
+Nicht jeder Spiegelstrich ist automatisch ein eigenes Kriterium.
+Ein Kriterium ist eine bewertbare Leistungseinheit.
+Konkrete Unterpunkte werden als expectedElements innerhalb dieses Kriteriums gespeichert.
 
-FALSCH:
+BEISPIEL 1 — EINLEITUNG:
+
+Aus:
+"Du hast eine vollständige Einleitung verfasst, die folgende Angaben enthält:
+- Textsorte: Gedicht
+- Titel: Der Pflaumenbaum
+- Autor: Bertolt Brecht
+- Entstehungsjahr: 1933
+- Thema: Beschreibung eines kleinen Pflaumenbaums
+- Inhalt: Ein kleiner Pflaumenbaum steht in einem Hof und kann nicht weiterwachsen ..."
+
+wird EIN Kriterium:
+
 {
-  "kriterium": "Titel",
-  "beschreibung": "Der Titel wird korrekt genannt.",
-  "erwartung": ""
+  "bereich": "Verstehensleistung",
+  "kriterium": "Vollständige Einleitung",
+  "beschreibung": "Die Einleitung enthält die geforderten Angaben zu Textsorte, Titel, Autor, Entstehungsjahr, Thema und Inhalt.",
+  "erwartung": "Textsorte: Gedicht; Titel: Der Pflaumenbaum; Autor: Bertolt Brecht; Entstehungsjahr: 1933; Thema: Beschreibung eines kleinen Pflaumenbaums; Inhalt: Ein kleiner Pflaumenbaum steht in einem Hof und kann nicht weiterwachsen.",
+  "expectedElements": [
+    { "label": "Textsorte", "erwartung": "Gedicht" },
+    { "label": "Titel", "erwartung": "Der Pflaumenbaum" },
+    { "label": "Autor", "erwartung": "Bertolt Brecht" },
+    { "label": "Entstehungsjahr", "erwartung": "1933" },
+    { "label": "Thema", "erwartung": "Beschreibung eines kleinen Pflaumenbaums" },
+    { "label": "Inhalt", "erwartung": "Ein kleiner Pflaumenbaum steht in einem Hof und kann nicht weiterwachsen." }
+  ],
+  "gewichtung": "",
+  "aktiv": true
 }
 
-RICHTIG:
+BEISPIEL 2 — INTERPRETATIONSHYPOTHESE:
+
+Aus:
+"Du hast eine Interpretationshypothese verfasst, etwa: Möglicherweise soll der Pflaumenbaum stellvertretend für einen Menschen stehen ..."
+
+wird EIN Kriterium:
+
 {
-  "kriterium": "Titel",
-  "beschreibung": "Der Titel wird als Der Pflaumenbaum benannt.",
-  "erwartung": "Der Pflaumenbaum"
+  "bereich": "Verstehensleistung",
+  "kriterium": "Interpretationshypothese",
+  "beschreibung": "Eine Interpretationshypothese zum Symbolcharakter des Pflaumenbaums wird vor der Analyse formuliert.",
+  "erwartung": "Der Pflaumenbaum steht möglicherweise stellvertretend für einen Menschen, der aufgrund äußerer Beschränkungen seine Fähigkeiten nicht entfalten kann, aber dennoch respektiert werden muss.",
+  "expectedElements": [
+    { "label": "Symbolcharakter", "erwartung": "Pflaumenbaum steht stellvertretend für einen Menschen" },
+    { "label": "äußere Beschränkungen", "erwartung": "äußere Beschränkungen verhindern die Entfaltung" },
+    { "label": "Respekt", "erwartung": "der Mensch muss dennoch respektiert werden" }
+  ],
+  "gewichtung": "",
+  "aktiv": true
 }
 
-FALSCH:
+BEISPIEL 3 — LYRISCHE FORM:
+
+Aus:
+"Du hast die lyrische Form beschrieben und erklärt:
+- drei Strophen mit jeweils vier Versen
+- Reimschema: je zwei Paarreime in den ersten beiden Strophen, Kreuzreim in der dritten Strophe"
+
+wird EIN Kriterium:
+
 {
-  "kriterium": "Autor",
-  "beschreibung": "Der Autor wird korrekt genannt.",
-  "erwartung": ""
+  "bereich": "Verstehensleistung",
+  "kriterium": "Lyrische Form",
+  "beschreibung": "Die lyrische Form wird anhand von Strophen, Versen und Reimschema beschrieben und erklärt.",
+  "erwartung": "drei Strophen mit jeweils vier Versen; je zwei Paarreime in den ersten beiden Strophen; Kreuzreim in der dritten Strophe",
+  "expectedElements": [
+    { "label": "Strophen und Verse", "erwartung": "drei Strophen mit jeweils vier Versen" },
+    { "label": "Paarreime", "erwartung": "je zwei Paarreime in den ersten beiden Strophen" },
+    { "label": "Kreuzreim", "erwartung": "Kreuzreim in der dritten Strophe" }
+  ],
+  "gewichtung": "",
+  "aktiv": true
 }
 
-RICHTIG:
+BEISPIEL 4 — EINZELSTROPHEN:
+
+Aus:
+"Strophe 1: Beschreibung des Pflaumenbaums als unglaublich klein, eingefasst von einem Gitter, das aber auch Schutz vor Tritten bietet; sprachliche Auffälligkeiten: einfache Umgangssprache"
+
+wird EIN Kriterium:
+
 {
-  "kriterium": "Autor",
-  "beschreibung": "Bertolt Brecht wird als Autor genannt.",
-  "erwartung": "Bertolt Brecht"
+  "bereich": "Verstehensleistung",
+  "kriterium": "Strophe 1: Beschreibung und Deutung",
+  "beschreibung": "Die erste Strophe wird inhaltlich beschrieben und gedeutet; sprachliche Auffälligkeiten werden berücksichtigt.",
+  "erwartung": "Pflaumenbaum als unglaublich klein; Gitter um den Baum; Gitter bietet Schutz vor Tritten; einfache Umgangssprache",
+  "expectedElements": [
+    { "label": "Kleinheit", "erwartung": "Pflaumenbaum als unglaublich klein" },
+    { "label": "Gitter", "erwartung": "eingefasst von einem Gitter" },
+    { "label": "Schutzfunktion", "erwartung": "Gitter bietet Schutz vor Tritten" },
+    { "label": "Sprache", "erwartung": "einfache Umgangssprache" }
+  ],
+  "gewichtung": "",
+  "aktiv": true
 }
 
-FALSCH:
-{
-  "kriterium": "Beschreibung Strophe 1",
-  "beschreibung": "Die erste Strophe wird beschrieben.",
-  "erwartung": ""
-}
-
-RICHTIG:
-{
-  "kriterium": "Strophe 1: Pflaumenbaum als unglaublich klein",
-  "beschreibung": "Die erste Strophe beschreibt den Pflaumenbaum als unglaublich klein.",
-  "erwartung": "Pflaumenbaum als unglaublich klein"
-}
-
-ATOMISIERUNG:
-- Jede einzelne Angabe wird ein eigenes Kriterium.
-- Jede konkrete Information wird erhalten.
-- Jeder Spiegelstrich wird ein eigenes Kriterium.
-- Aufzählungen nach Doppelpunkt werden aufgeteilt.
-- Beispiele, Zitate, Versangaben und sprachliche Auffälligkeiten werden nicht ausgelassen.
-- Strukturangaben wie Einleitung, Interpretationshypothese, Hauptteil, Fazit bleiben als eigene Kriterien erhalten, wenn sie im Raster vorkommen.
-- Wenn ein Strukturpunkt einen konkreten Inhalt enthält, muss dieser Inhalt in "erwartung" stehen.
+REGELN:
+- Bündele Unterpunkte, wenn sie zusammen eine bewertbare Teilleistung bilden.
+- Zerlege nur dann, wenn eigenständige Analyseleistungen entstehen.
+- Der konkrete Inhalt darf niemals verloren gehen.
+- expectedElements ist wichtig und muss konkrete Untererwartungen enthalten.
+- "beschreibung" beschreibt die Leistungseinheit.
+- "erwartung" sammelt die konkreten Inhalte.
+- Keine Noten.
+- Keine Punkte vergeben.
+- Keine erfundenen Kriterien.
 
 BEREICHE:
 Übernimm vorhandene Bereiche wie:
@@ -387,6 +449,12 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
       "kriterium": "string",
       "beschreibung": "string",
       "erwartung": "string",
+      "expectedElements": [
+        {
+          "label": "string",
+          "erwartung": "string"
+        }
+      ],
       "gewichtung": "string",
       "aktiv": true
     }
@@ -396,49 +464,45 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
 AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
-- Maximal 80 Kriterien.
-- "kriterium" ist kurz, aber konkret.
-- "beschreibung" enthält den konkreten erwarteten Inhalt.
-- "erwartung" enthält den konkreten Inhalt möglichst nah am Original.
-- Wenn der konkrete Inhalt nicht gelesen werden kann, schreibe in "erwartung": "nicht eindeutig lesbar".
+- Maximal 30 Kriterien.
+- Lieber wenige intelligente Kriterien mit expectedElements als viele atomisierte Einzelpunkte.
+- Keine konkreten Inhalte auslassen.
 `;
 }
 
-function buildConcreteDescription(description: string, expectation: string, criterion: string): string {
+function buildDescription(
+  description: string,
+  expectation: string,
+  expectedElements: { label: string; erwartung: string }[],
+  criterion: string,
+): string {
   const d = clean(description);
   const e = clean(expectation);
 
-  if (!d && e) return e;
-  if (!e) return d || criterion;
+  if (d) return d;
 
-  const lowerDescription = d.toLowerCase();
-  const lowerExpectation = e.toLowerCase();
-
-  if (lowerDescription.includes(lowerExpectation)) {
-    return d;
+  if (expectedElements.length > 0) {
+    return `${criterion}: ${expectedElements
+      .map((item) => `${item.label}: ${item.erwartung}`)
+      .join("; ")}`;
   }
 
-  if (isGenericDescription(d)) {
-    return `${d} Erwartet: ${e}`;
-  }
-
-  return `${d} Erwartet: ${e}`;
+  return e || criterion;
 }
 
-function isGenericDescription(value: string): boolean {
-  const text = value.toLowerCase();
+function normalizeExpectedElements(
+  input: { label: string; erwartung: string }[],
+): { label: string; erwartung: string }[] {
+  return input
+    .map((item) => ({
+      label: clean(item.label),
+      erwartung: clean(item.erwartung),
+    }))
+    .filter((item) => item.label || item.erwartung);
+}
 
-  return (
-    text.includes("korrekt genannt") ||
-    text.includes("wird genannt") ||
-    text.includes("wird benannt") ||
-    text.includes("wird beschrieben") ||
-    text.includes("wird erklärt") ||
-    text.includes("wird erkannt") ||
-    text.includes("wird berücksichtigt") ||
-    text.includes("prüft, ob") ||
-    text.includes("soll")
-  );
+function expectedElementsToText(input: { label: string; erwartung: string }[]): string {
+  return input.map((item) => `${item.label}: ${item.erwartung}`).join("; ");
 }
 
 function clean(value: unknown): string {
