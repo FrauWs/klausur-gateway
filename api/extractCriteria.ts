@@ -1,7 +1,11 @@
 // api/extractCriteria.ts
 
+import OpenAI from "openai";
 import { z } from "zod";
-import crypto from "crypto";
+
+export const config = {
+  maxDuration: 60,
+};
 
 declare const process: {
   env: {
@@ -16,33 +20,31 @@ type ExtractCriteriaRequestBody = {
   fileName?: string;
 };
 
-const ExpectedElementSchema = z.object({
-  id: z.string().optional(),
-  label: z.string().optional(),
-  erwartung: z.string(),
-  erfüllt: z.boolean().optional(),
-  kommentar: z.string().optional(),
-});
-
-const CriterionSchema = z.object({
-  bereich: z.string(),
-  kriterium: z.string(),
-  beschreibung: z.string(),
-  erwartung: z.string(),
-  expectedElements: z.array(ExpectedElementSchema).optional(),
-  gewichtung: z.string().optional(),
-  aktiv: z.boolean().optional(),
-});
-
-const CriteriaSchema = z.object({
-  criteria: z.array(CriterionSchema),
-});
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
+
+const ExpectedElementSchema = z.object({
+  label: z.string(),
+  erwartung: z.string(),
+});
+
+const CriteriaSchema = z.object({
+  summary: z.string().optional(),
+  criteria: z.array(
+    z.object({
+      bereich: z.string(),
+      kriterium: z.string(),
+      beschreibung: z.string(),
+      erwartung: z.string(),
+      expectedElements: z.array(ExpectedElementSchema).optional(),
+      gewichtung: z.string().optional(),
+      aktiv: z.boolean().optional(),
+    }),
+  ),
+});
 
 function applyCors(res: any) {
   Object.entries(corsHeaders).forEach(([key, value]) => {
@@ -56,8 +58,13 @@ function sendJson(res: any, status: number, payload: unknown) {
   return res.status(status).json(payload);
 }
 
-function createId() {
-  return crypto.randomUUID();
+function cleanJsonText(text: string): string {
+  return text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
 }
 
 export default async function handler(req: any, res: any) {
@@ -77,36 +84,27 @@ export default async function handler(req: any, res: any) {
   try {
     const body = (req.body ?? {}) as ExtractCriteriaRequestBody;
 
-    const expectationHorizonText = String(
-      body.expectationHorizonText ?? "",
-    ).trim();
-    const imageBase64 = String(body.imageBase64 ?? "").trim();
-    const imageMimeType = String(body.imageMimeType ?? "").trim();
-    const fileName = String(body.fileName ?? "").trim();
+    const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
+    const fileBase64 = String(body.imageBase64 ?? "").trim();
+    const fileMimeType = String(body.imageMimeType ?? "").trim() || "image/png";
+    const fileName = String(body.fileName ?? "").trim() || "Erwartungshorizont";
 
-    if (!expectationHorizonText && !imageBase64) {
+    if (!expectationHorizonText && !fileBase64) {
       return sendJson(res, 400, {
         ok: false,
         error: "EMPTY_INPUT",
-        message: "Es wurde weder Rastertext noch Bildinhalt übergeben.",
+        message: "Es wurde weder Rastertext noch Dateiinhalt übergeben.",
       });
     }
 
-    if (imageBase64 && imageMimeType === "application/pdf") {
-      return sendJson(res, 400, {
-        ok: false,
-        error: "PDF_NOT_SUPPORTED",
-        message:
-          "PDF-Dateien können in dieser Gateway-Version nicht direkt ausgelesen werden. Bitte das Raster als PNG/JPG-Screenshot hochladen oder als Text/Excel/CSV verwenden.",
-      });
-    }
+    const isPdf = fileBase64 && fileMimeType === "application/pdf";
+    const isImage = fileBase64 && fileMimeType.startsWith("image/");
 
-    if (imageBase64 && !imageMimeType.startsWith("image/")) {
+    if (fileBase64 && !isPdf && !isImage) {
       return sendJson(res, 400, {
         ok: false,
         error: "UNSUPPORTED_FILE_TYPE",
-        message:
-          "Für die Rastererkennung werden aktuell nur Bilder, Text, Excel oder CSV unterstützt.",
+        message: "Unterstützt werden aktuell Text, PDF, PNG und JPG.",
       });
     }
 
@@ -119,65 +117,56 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const messages = imageBase64
-      ? buildImageMessages(imageBase64, imageMimeType, fileName)
-      : buildTextMessages(expectationHorizonText);
+    const openai = new OpenAI({ apiKey });
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      temperature: 0,
+      input: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: SYSTEM_PROMPT,
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: buildInputContent({
+            expectationHorizonText,
+            fileBase64,
+            fileMimeType,
+            fileName,
+          }),
+        },
+      ],
+      text: {
+        format: {
+          type: "json_object",
+        },
       },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages,
-      }),
     });
 
-    const raw = await response.text();
+    const raw = response.output_text;
 
-    if (!response.ok) {
-      return sendJson(res, 500, {
-        ok: false,
-        error: "OPENAI_ERROR",
-        raw,
-      });
-    }
-
-    let parsedOpenAI: any;
-
-    try {
-      parsedOpenAI = JSON.parse(raw);
-    } catch {
-      return sendJson(res, 500, {
-        ok: false,
-        error: "INVALID_OPENAI_RESPONSE",
-        raw,
-      });
-    }
-
-    const content = parsedOpenAI?.choices?.[0]?.message?.content;
-
-    if (!content || typeof content !== "string") {
+    if (!raw || typeof raw !== "string") {
       return sendJson(res, 500, {
         ok: false,
         error: "EMPTY_MODEL_RESPONSE",
-        parsedOpenAI,
       });
     }
 
     let modelJson: unknown;
 
     try {
-      modelJson = JSON.parse(content);
+      modelJson = JSON.parse(cleanJsonText(raw));
     } catch {
       return sendJson(res, 500, {
         ok: false,
         error: "MODEL_NOT_JSON",
-        content,
+        content: raw,
       });
     }
 
@@ -195,39 +184,22 @@ export default async function handler(req: any, res: any) {
     const criteria = result.data.criteria
       .map((criterion, index) => {
         const bereich = clean(criterion.bereich) || "Allgemein";
-        const kriterium =
-          clean(criterion.kriterium) || `Kriterium ${index + 1}`;
-        const erwartung = clean(criterion.erwartung);
+        const kriterium = clean(criterion.kriterium) || `Kriterium ${index + 1}`;
+        const expectedElements = normalizeExpectedElements(
+          criterion.expectedElements ?? [],
+        );
+        const erwartung =
+          clean(criterion.erwartung) || expectedElementsToText(expectedElements);
         const beschreibung = clean(criterion.beschreibung);
 
-        const expectedElements =
-          criterion.expectedElements && criterion.expectedElements.length > 0
-            ? criterion.expectedElements.map((element, elementIndex) => ({
-                id: createId(),
-                label:
-                  clean(element.label) ||
-                  `Teilerwartung ${elementIndex + 1}`,
-                erwartung: clean(element.erwartung),
-                erfüllt: element.erfüllt ?? false,
-                kommentar: clean(element.kommentar ?? ""),
-              }))
-            : [
-                {
-                  id: createId(),
-                  label: kriterium,
-                  erwartung: erwartung || beschreibung || kriterium,
-                  erfüllt: false,
-                  kommentar: "",
-                },
-              ];
-
         return {
-          id: createId(),
+          id: `crit-${index}`,
           bereich,
           kriterium,
-          beschreibung: buildConcreteDescription(
+          beschreibung: buildDescription(
             beschreibung,
             erwartung,
+            expectedElements,
             kriterium,
           ),
           erwartung,
@@ -238,10 +210,7 @@ export default async function handler(req: any, res: any) {
       })
       .filter(
         (criterion) =>
-          criterion.kriterium ||
-          criterion.beschreibung ||
-          criterion.erwartung ||
-          criterion.expectedElements.length > 0,
+          criterion.kriterium || criterion.beschreibung || criterion.erwartung,
       );
 
     if (criteria.length === 0) {
@@ -255,13 +224,14 @@ export default async function handler(req: any, res: any) {
 
     return sendJson(res, 200, {
       ok: true,
+      summary: clean(result.data.summary ?? ""),
       criteria,
       debug: {
         count: criteria.length,
-        inputType: imageBase64 ? imageMimeType : "text",
+        inputType: fileBase64 ? fileMimeType : "text",
         fileName,
       },
-      usage: parsedOpenAI?.usage ?? null,
+      usage: response.usage ?? null,
     });
   } catch (error: any) {
     return sendJson(res, 500, {
@@ -272,85 +242,80 @@ export default async function handler(req: any, res: any) {
   }
 }
 
-function buildTextMessages(expectationHorizonText: string) {
-  return [
-    {
-      role: "system",
-      content: SYSTEM_PROMPT,
-    },
-    {
-      role: "user",
-      content: buildPrompt(expectationHorizonText),
-    },
-  ];
-}
+function buildInputContent(params: {
+  expectationHorizonText: string;
+  fileBase64: string;
+  fileMimeType: string;
+  fileName: string;
+}) {
+  const { expectationHorizonText, fileBase64, fileMimeType, fileName } = params;
 
-function buildImageMessages(
-  imageBase64: string,
-  imageMimeType: string,
-  fileName: string,
-) {
-  return [
+  const content: any[] = [
     {
-      role: "system",
-      content: SYSTEM_PROMPT,
-    },
-    {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: buildPrompt(
-            `Das Bewertungsraster liegt als Bild vor. Dateiname: ${
-              fileName || "unbekannt"
-            }. Lies den sichtbaren Text vollständig aus. Extrahiere ausschließlich die dort sichtbaren konkreten Erwartungen.`,
-          ),
-        },
-        {
-          type: "image_url",
-          image_url: {
-            url: `data:${imageMimeType};base64,${imageBase64}`,
-          },
-        },
-      ],
+      type: "input_text",
+      text: buildPrompt(
+        expectationHorizonText ||
+          `Das Bewertungsraster liegt als Datei vor. Dateiname: ${fileName}. Lies den Inhalt vollständig aus und extrahiere daraus bewertbare Leistungseinheiten mit konkreten Untererwartungen.`,
+      ),
     },
   ];
+
+  if (fileBase64 && fileMimeType === "application/pdf") {
+    content.push({
+      type: "input_file",
+      filename: fileName.endsWith(".pdf") ? fileName : `${fileName}.pdf`,
+      file_data: `data:application/pdf;base64,${fileBase64}`,
+    });
+  }
+
+  if (fileBase64 && fileMimeType.startsWith("image/")) {
+    content.push({
+      type: "input_image",
+      image_url: `data:${fileMimeType};base64,${fileBase64}`,
+    });
+  }
+
+  return content;
 }
 
 const SYSTEM_PROMPT = `
 Du extrahierst Bewertungsraster aus Erwartungshorizonten.
 
+Grundregel:
+Ein Kriterium ist eine bewertbare Leistungseinheit.
+Nicht jeder Unterpunkt ist automatisch ein eigenes Kriterium.
+
+Du unterscheidest:
+1. Kriterium = übergeordnete bewertbare Leistungseinheit
+2. expectedElements = konkrete Teilanforderungen innerhalb dieses Kriteriums
+
 Du darfst keine allgemeinen Kriterien erfinden.
 Du darfst keine pädagogischen Standardformulierungen erzeugen.
-Du darfst nicht zusammenfassen.
-Du darfst nicht bündeln.
 Du darfst keine konkreten Inhalte weglassen.
-
-Wichtig:
-Jedes Kriterium braucht zusätzlich "expectedElements".
-"expectedElements" enthält kleinteilige Teilerwartungen.
-Jede Teilerwartung muss später einzeln für Randkommentare nutzbar sein.
+Du darfst aber sinnvoll bündeln, wenn mehrere Unterpunkte gemeinsam eine einzige bewertbare Leistungseinheit bilden.
 
 Gib ausschließlich gültiges JSON zurück.
 `;
 
 function buildPrompt(text: string): string {
   return `
-Extrahiere aus dem folgenden Erwartungshorizont ein konkretes, kleinteiliges Bewertungsraster.
+Extrahiere aus dem folgenden Erwartungshorizont ein Bewertungsraster.
 
-ATOMISIERUNG:
-- Jede einzelne Angabe wird ein eigenes Kriterium oder eine eigene Teilerwartung.
-- Jeder Spiegelstrich wird erhalten.
-- Aufzählungen nach Doppelpunkt werden aufgeteilt.
-- Beispiele, Zitate, Versangaben und sprachliche Auffälligkeiten werden nicht ausgelassen.
-- Strukturangaben wie Einleitung, Interpretationshypothese, Hauptteil, Fazit bleiben erhalten.
+ZENTRALE ENTSCHEIDUNG:
+Nicht jeder Spiegelstrich ist automatisch ein eigenes Kriterium.
+Ein Kriterium ist eine bewertbare Leistungseinheit.
+Konkrete Unterpunkte werden als expectedElements innerhalb dieses Kriteriums gespeichert.
 
-TEXT ODER BILDINHALT:
+Zusätzlich:
+Erstelle eine kurze summary in 2 bis 4 Sätzen. Diese summary soll knapp beschreiben, worum es im Erwartungshorizont geht und welche Leistungsschwerpunkte er setzt.
+
+TEXT ODER DATEIINHALT:
 ${text}
 
 Gib ausschließlich JSON in exakt dieser Struktur zurück:
 
 {
+  "summary": "string",
   "criteria": [
     {
       "bereich": "string",
@@ -360,9 +325,7 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
       "expectedElements": [
         {
           "label": "string",
-          "erwartung": "string",
-          "erfüllt": false,
-          "kommentar": ""
+          "erwartung": "string"
         }
       ],
       "gewichtung": "string",
@@ -371,37 +334,48 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
   ]
 }
 
-REGELN:
+AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
-- Maximal 80 Kriterien.
-- "kriterium" ist kurz, aber konkret.
-- "beschreibung" enthält den konkreten erwarteten Inhalt.
-- "erwartung" enthält den konkreten Inhalt möglichst nah am Original.
-- "expectedElements" darf niemals leer sein.
-- Jede Teilerwartung in "expectedElements" muss kommentierbar sein.
+- Maximal 30 Kriterien.
+- Lieber wenige intelligente Kriterien mit expectedElements als viele atomisierte Einzelpunkte.
+- Keine konkreten Inhalte auslassen.
 `;
 }
 
-function buildConcreteDescription(
+function buildDescription(
   description: string,
   expectation: string,
+  expectedElements: { label: string; erwartung: string }[],
   criterion: string,
 ): string {
   const d = clean(description);
   const e = clean(expectation);
 
-  if (!d && e) return e;
-  if (!e) return d || criterion;
+  if (d) return d;
 
-  const lowerDescription = d.toLowerCase();
-  const lowerExpectation = e.toLowerCase();
-
-  if (lowerDescription.includes(lowerExpectation)) {
-    return d;
+  if (expectedElements.length > 0) {
+    return `${criterion}: ${expectedElements
+      .map((item) => `${item.label}: ${item.erwartung}`)
+      .join("; ")}`;
   }
 
-  return `${d} Erwartet: ${e}`.trim();
+  return e || criterion;
+}
+
+function normalizeExpectedElements(
+  input: { label: string; erwartung: string }[],
+): { label: string; erwartung: string }[] {
+  return input
+    .map((item) => ({
+      label: clean(item.label),
+      erwartung: clean(item.erwartung),
+    }))
+    .filter((item) => item.label || item.erwartung);
+}
+
+function expectedElementsToText(input: { label: string; erwartung: string }[]) {
+  return input.map((item) => `${item.label}: ${item.erwartung}`).join("; ");
 }
 
 function clean(value: unknown): string {
