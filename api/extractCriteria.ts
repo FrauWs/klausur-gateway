@@ -182,7 +182,7 @@ function buildOpenAiPayload(params: {
       type: "input_text",
       text: buildPrompt(
         expectationHorizonText ||
-          `Das Bewertungsraster liegt als Datei vor. Dateiname: ${fileName}. Lies den Inhalt vollständig und seitenübergreifend aus.`,
+          `Das Bewertungsraster liegt als Datei vor. Dateiname: ${fileName}. Lies den Inhalt vollständig und seitenübergreifend aus. Verwende ausschließlich Angaben aus dieser Datei.`,
       ),
     },
   ];
@@ -229,108 +229,90 @@ function buildOpenAiPayload(params: {
 }
 
 const SYSTEM_PROMPT = `
-Du extrahierst Bewertungsraster aus Erwartungshorizonten.
+Du bist kein Bewertungsassistent, sondern ein Extraktionssystem.
 
-Deine Aufgabe ist NICHT, ein neues kompaktes Raster zu entwerfen.
-Deine Aufgabe ist, das vorhandene Raster möglichst detailgetreu in eine strukturierte Form zu übertragen.
+Deine Aufgabe:
+Du liest einen Erwartungshorizont oder ein Bewertungsraster aus einer Datei und überträgst die dort vorhandenen Angaben möglichst textnah in eine JSON-Struktur.
 
-Grundregeln:
-- Übernimm konkrete Angaben aus dem Erwartungshorizont.
-- Kürze keine Inhalte weg.
-- Verallgemeinere nicht.
-- Ersetze konkrete Angaben niemals durch Formulierungen wie "alle wesentlichen Angaben", "sprachliche Besonderheiten" oder "angemessene Analyse".
-- Ein zwei Seiten langes Raster darf nicht auf wenige Sammelkriterien reduziert werden.
-- Wenn der Erwartungshorizont viele Unterpunkte enthält, müssen diese als expectedElements erhalten bleiben.
-- expectedElements sind zentral und sollen konkrete Textdetails, Fachbegriffe, Teilanforderungen, Beispiele und Beobachtungen enthalten.
-- Kriterien dürfen bündeln, aber nur, wenn alle konkreten Unterpunkte innerhalb von expectedElements erhalten bleiben.
-- Wenn einzelne Strophen, Abschnitte, Aufgabenbereiche oder Analyseaspekte getrennt aufgeführt sind, sollen sie als eigene Kriterien erhalten bleiben.
-- Darstellungsleistung darf gebündelt werden, Verstehensleistung soll differenziert bleiben.
+Strikte Regeln:
+- Du darfst keine Kriterien erfinden.
+- Du darfst keine allgemeinen Ersatzformulierungen bilden.
+- Du darfst keine konkreten Angaben durch Oberbegriffe ersetzen.
+- Du darfst nicht schreiben: "alle relevanten Angaben", "sprachliche Besonderheiten", "korrekt beschrieben", "plausibel", "angemessen", wenn im Raster konkrete Angaben stehen.
+- Du musst konkrete Angaben aus dem Raster übernehmen.
+- Wenn ein Detail im Raster steht, muss es in erwartung oder expectedElements erscheinen.
+- Wenn ein Detail nicht im Raster steht oder nicht lesbar ist, darfst du es nicht ergänzen.
+- Wenn der Text nicht lesbar ist, schreibe "im Raster nicht lesbar".
+- Nutze möglichst die Formulierungen des Rasters.
+- expectedElements müssen konkret sein.
+- Die Verstehensleistung darf nicht zu wenigen Sammelkriterien reduziert werden.
+- Darstellungsleistung darf knapper gebündelt werden.
 
-Gib ausschließlich gültiges JSON zurück.
+Wichtig:
+Das Ergebnis soll nicht schön formuliert sein, sondern quellentreu.
 `.trim();
 
 function buildPrompt(text: string): string {
   return `
-Extrahiere aus dem folgenden Erwartungshorizont ein detailreiches Bewertungsraster.
+Extrahiere aus dem folgenden Erwartungshorizont ein quellentreues Bewertungsraster.
 
-ENTSCHEIDENDE REGEL:
-Das Ergebnis muss den Inhalt des Erwartungshorizonts möglichst vollständig abbilden.
-Wenn der Erwartungshorizont zwei Seiten lang ist, sind 4 Kriterien fast sicher zu wenig.
+ARBEITSWEISE:
+1. Lies zuerst die Angaben aus dem Raster.
+2. Übernimm konkrete Details textnah.
+3. Strukturiere erst danach in Kriterien.
+4. Erfinde nichts.
+5. Verallgemeinere nichts.
 
-ZIELUMFANG:
-- Bei kurzen Rastern: 6 bis 12 Kriterien.
-- Bei zweiseitigen Rastern: 12 bis 25 Kriterien.
-- Maximal 35 Kriterien.
-- Lieber mehrere fachlich saubere Kriterien als zu grobe Sammelpunkte.
+ZENTRALE REGEL:
+Jede konkrete Angabe aus dem Erwartungshorizont muss erhalten bleiben.
 
-NICHT ERLAUBT:
-- "Die Einleitung enthält alle relevanten Angaben."
-- "Die Form wird korrekt beschrieben."
-- "Die Strophen werden analysiert."
-- "Sprachliche Auffälligkeiten werden berücksichtigt."
-- "Ein sinnvolles Fazit wird formuliert."
+FALSCH:
+"Die Einleitung enthält die geforderten Angaben zum Gedicht."
 
-ERLAUBT / ERWÜNSCHT:
-- Textsorte: Gedicht
-- Titel: Der Pflaumenbaum
-- Autor: Bertolt Brecht
-- Entstehungsjahr: 1933
-- Thema: Beschreibung eines kleinen Pflaumenbaums
-- Inhalt: kleiner Pflaumenbaum im Hof, kann nicht weiterwachsen
-- drei Strophen mit jeweils vier Versen
-- Paarreime / Kreuzreim
-- Gitter als Schutz und Begrenzung
-- Pflaumenbaum als Symbol für einen Menschen
-- äußere Beschränkungen
-- Anerkennung trotz eingeschränkter Entfaltungsmöglichkeiten
-- einfache Umgangssprache
-- Wiederholungen
-- Personifikation
-- konkrete Deutung einzelner Strophen
+RICHTIG:
+"Textsorte: Gedicht; Titel: Der Pflaumenbaum; Autor: Bertolt Brecht; Entstehungsjahr: 1933; Thema: ...; Inhalt: ..."
 
-REGEL FÜR KRITERIEN:
-Ein Kriterium ist eine bewertbare Teilleistung.
-Ein erwarteter Einzelaspekt innerhalb dieser Teilleistung kommt in expectedElements.
+FALSCH:
+"Die erste Strophe wird inhaltlich und sprachlich analysiert."
 
-BEISPIEL:
-Wenn im Erwartungshorizont steht:
-"vollständige Einleitung mit Textsorte, Titel, Autor, Entstehungsjahr, Thema und Inhalt"
+RICHTIG:
+Die erwarteten Einzelaspekte der ersten Strophe müssen konkret genannt werden, zum Beispiel:
+- Pflaumenbaum ist sehr klein
+- steht im Hof
+- ist von einem Gitter umgeben
+- Gitter schützt vor Tritten
+- zugleich Begrenzung / Einschränkung
+- sprachliche Beobachtungen genau so übernehmen, wie sie im Raster stehen
 
-Dann darf das NICHT nur werden:
-"Die Einleitung enthält alle relevanten Angaben."
+FALSCH:
+"sprachliche Auffälligkeiten"
 
-Sondern es muss werden:
-{
-  "bereich": "Verstehensleistung",
-  "kriterium": "Vollständige Einleitung",
-  "beschreibung": "Die Einleitung enthält die geforderten Angaben zum Gedicht.",
-  "erwartung": "Textsorte, Titel, Autor, Entstehungsjahr, Thema und Inhalt werden konkret benannt.",
-  "expectedElements": [
-    { "label": "Textsorte", "erwartung": "Gedicht" },
-    { "label": "Titel", "erwartung": "Der Pflaumenbaum" },
-    { "label": "Autor", "erwartung": "Bertolt Brecht" },
-    { "label": "Entstehungsjahr", "erwartung": "1933" },
-    { "label": "Thema", "erwartung": "Beschreibung eines kleinen Pflaumenbaums" },
-    { "label": "Inhalt", "erwartung": "Ein kleiner Pflaumenbaum steht in einem Hof und kann nicht weiterwachsen." }
-  ],
-  "gewichtung": "",
-  "aktiv": true
-}
+RICHTIG:
+Konkrete sprachliche Auffälligkeiten aus dem Raster nennen, z. B. Wiederholung, Personifikation, Umgangssprache, Kontrast, Metapher usw. Nur nennen, wenn sie im Raster stehen.
 
-AUFTEILUNG:
-- Einleitung: eigenes Kriterium
-- Interpretationshypothese: eigenes Kriterium
-- lyrische Form: eigenes Kriterium
-- jede einzeln erkennbare Strophe / jeder Analyseabschnitt: eigenes Kriterium
-- sprachliche Analyse nur dann bündeln, wenn alle Mittel konkret in expectedElements stehen
-- Aussageabsicht / Deutung: eigenes Kriterium
-- Fazit: eigenes Kriterium
-- Darstellungsleistung: ein bis drei Kriterien, je nach Vorlage
+AUSGABELOGIK:
+- Einleitung = eigenes Kriterium
+- Interpretationshypothese = eigenes Kriterium
+- Form = eigenes Kriterium
+- Jede Strophe / jeder Analyseabschnitt = eigenes Kriterium, wenn im Raster getrennt
+- Sprache = eigenes Kriterium oder expectedElements bei der jeweiligen Strophe, abhängig vom Raster
+- Aussageabsicht = eigenes Kriterium
+- Fazit = eigenes Kriterium
+- Darstellungsleistung = ein bis drei Kriterien
+
+MINDESTDETAIL:
+Bei jedem fachlichen Kriterium müssen expectedElements gefüllt werden.
+Wenn expectedElements leer wären, ist das Kriterium wahrscheinlich zu allgemein.
+
+ERWARTUNG:
+- Bei einem zweiseitigen Raster sind 10 bis 25 Kriterien normal.
+- 4 bis 8 Kriterien sind nur akzeptabel, wenn das Raster selbst sehr kurz ist.
+- Konkrete Unterpunkte müssen in expectedElements stehen.
 
 SUMMARY:
-Erstelle eine kurze summary in 2 bis 4 Sätzen. Sie soll nur zusammenfassen, nicht die Kriterien ersetzen.
+Erstelle eine kurze summary in 2 bis 4 Sätzen. Die summary ersetzt nicht die Kriterien.
 
-ERWARTUNGSHORIZONT:
+ERWARTUNGSHORIZONT / RASTER:
 ${text}
 
 Gib ausschließlich JSON in exakt dieser Struktur zurück:
@@ -358,10 +340,11 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
 AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
-- Keine allgemeinen Ersatzformulierungen.
-- Konkrete Angaben aus dem Erwartungshorizont vollständig übernehmen.
-- expectedElements bei jedem fachlichen Kriterium möglichst konkret füllen.
-- Wenn du unsicher bist, ob etwas ein eigenes Kriterium oder expectedElement ist: lieber eigenes Kriterium.
+- Keine abstrakten Platzhalter.
+- Keine erfundenen Inhalte.
+- Keine pädagogischen Standardformulierungen.
+- expectedElements niemals weglassen, wenn konkrete Unterpunkte vorhanden sind.
+- Formuliere textnah zum Raster.
 `.trim();
 }
 
@@ -390,16 +373,28 @@ function normalizeCriteria(input: any): Criterion[] {
   return raw
     .map((criterion, index) => {
       const expectedElements = normalizeExpectedElements(criterion?.expectedElements ?? []);
-      const erwartung =
-        clean(criterion?.erwartung ?? "") || expectedElementsToText(expectedElements);
+
+      const expectedElementsText = expectedElementsToText(expectedElements);
+
+      const rawErwartung = clean(criterion?.erwartung ?? "");
+      const rawBeschreibung = clean(criterion?.beschreibung ?? "");
+
       const kriterium =
         clean(criterion?.kriterium ?? "") ||
         clean(criterion?.title ?? "") ||
         `Kriterium ${index + 1}`;
 
+      const erwartung = rawErwartung || expectedElementsText;
+
+      const beschreibungParts = [
+        rawBeschreibung,
+        expectedElements.length > 0 ? `Konkrete Anforderungen: ${expectedElementsText}` : "",
+      ].filter(Boolean);
+
       const beschreibung =
-        clean(criterion?.beschreibung ?? "") ||
-        buildDescription(kriterium, erwartung, expectedElements);
+        beschreibungParts.join(" ") ||
+        erwartung ||
+        kriterium;
 
       return {
         id: `crit-${index}`,
@@ -435,20 +430,6 @@ function normalizeExpectedElements(input: any): ExpectedElement[] {
 
 function expectedElementsToText(input: ExpectedElement[]): string {
   return input.map((item) => `${item.label}: ${item.erwartung}`).join("; ");
-}
-
-function buildDescription(
-  kriterium: string,
-  erwartung: string,
-  expectedElements: ExpectedElement[],
-): string {
-  if (expectedElements.length > 0) {
-    return `${kriterium}: ${expectedElements
-      .map((item) => `${item.label}: ${item.erwartung}`)
-      .join("; ")}`;
-  }
-
-  return erwartung || kriterium;
 }
 
 function cleanJsonText(text: string): string {
