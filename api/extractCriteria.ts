@@ -1,14 +1,22 @@
 // api/extractCriteria.ts
 
+import { z } from "zod";
+
 declare const process: {
   env: {
     OPENAI_API_KEY?: string;
   };
 };
 
-type ExtractCriteriaRequestBody = {
-  expectationHorizonText?: string;
-};
+const CriteriaSchema = z.object({
+  criteria: z.array(
+    z.object({
+      bereich: z.string(),
+      kriterium: z.string(),
+      beschreibung: z.string(),
+    })
+  ),
+});
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -36,30 +44,22 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const body = (req.body ?? {}) as ExtractCriteriaRequestBody;
-
-    const text = String(body.expectationHorizonText ?? "").trim();
+    const text = String(req.body?.expectationHorizonText ?? "").trim();
 
     if (!text) {
       return sendJson(res, 400, {
         ok: false,
-        error: "MISSING_EXPECTATION_HORIZON",
+        error: "EMPTY_INPUT",
       });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
-
     if (!apiKey) {
       return sendJson(res, 500, {
         ok: false,
-        error: "MISSING_API_KEY",
+        error: "NO_API_KEY",
       });
     }
-
-    const prompt = buildPrompt(text);
-
-    console.log("=== EXTRACT CRITERIA INPUT ===");
-    console.log(text);
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -74,89 +74,97 @@ export default async function handler(req: any, res: any) {
         messages: [
           {
             role: "system",
-            content: "Extrahiere ein vollständiges Bewertungsraster. Nur JSON.",
+            content:
+              "Du extrahierst Bewertungsraster vollständig. Kein Zusammenfassen. Nur JSON.",
           },
           {
             role: "user",
-            content: prompt,
+            content: buildPrompt(text),
           },
         ],
       }),
     });
 
-    const rawText = await response.text();
+    const raw = await response.text();
 
-    console.log("=== OPENAI RAW RESPONSE ===");
-    console.log(rawText);
+    console.log("RAW:", raw);
 
     if (!response.ok) {
       return sendJson(res, 500, {
         ok: false,
         error: "OPENAI_ERROR",
-        raw: rawText,
+        raw,
       });
     }
 
     let parsed;
-
     try {
-      parsed = JSON.parse(rawText);
+      parsed = JSON.parse(raw);
     } catch {
       return sendJson(res, 500, {
         ok: false,
-        error: "INVALID_JSON",
-        raw: rawText,
+        error: "INVALID_OPENAI_RESPONSE",
+        raw,
       });
     }
 
-    const content = parsed?.choices?.[0]?.message?.content ?? "";
+    const content = parsed?.choices?.[0]?.message?.content;
 
-    console.log("=== MODEL CONTENT ===");
-    console.log(content);
+    if (!content) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "EMPTY_MODEL_RESPONSE",
+        parsed,
+      });
+    }
 
-    let final;
-
+    let json;
     try {
-      final = JSON.parse(content);
+      json = JSON.parse(content);
     } catch {
       return sendJson(res, 500, {
         ok: false,
-        error: "INVALID_MODEL_JSON",
+        error: "MODEL_NOT_JSON",
         content,
       });
     }
 
-    const criteria = Array.isArray(final.criteria) ? final.criteria : [];
+    const result = CriteriaSchema.safeParse(json);
 
-    console.log("=== FINAL CRITERIA ===");
-    console.log(criteria);
+    if (!result.success) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "INVALID_SCHEMA",
+        issues: result.error.issues,
+        json,
+      });
+    }
 
     return sendJson(res, 200, {
       ok: true,
-      criteria,
+      criteria: result.data.criteria,
       debug: {
-        inputLength: text.length,
-        criteriaCount: criteria.length,
+        count: result.data.criteria.length,
       },
     });
   } catch (e: any) {
     return sendJson(res, 500, {
       ok: false,
       error: "SERVER_ERROR",
-      message: e?.message ?? "UNKNOWN",
+      message: e?.message,
     });
   }
 }
 
 function buildPrompt(text: string) {
   return `
-Extrahiere ALLE Bewertungskriterien aus dem folgenden Erwartungshorizont.
+Extrahiere ein vollständiges Bewertungsraster.
 
 WICHTIG:
-- Jeder Punkt = eigenes Kriterium
-- Keine Zusammenfassung
-- Keine Bündelung
-- Original möglichst erhalten
+- Jede Zeile = eigenes Kriterium
+- KEINE Zusammenfassung
+- KEIN Zusammenfassen mehrerer Punkte
+- Struktur erhalten
 
 TEXT:
 ${text}
