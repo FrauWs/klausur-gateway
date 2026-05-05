@@ -1,6 +1,5 @@
 // api/extractCriteria.ts
 
-import OpenAI from "openai";
 import { z } from "zod";
 
 declare const process: {
@@ -16,31 +15,24 @@ type ExtractCriteriaRequestBody = {
   fileName?: string;
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-
-const ExpectedElementSchema = z.object({
-  label: z.string(),
-  erwartung: z.string(),
-});
-
 const CriteriaSchema = z.object({
-  summary: z.string().optional(),
   criteria: z.array(
     z.object({
       bereich: z.string(),
       kriterium: z.string(),
       beschreibung: z.string(),
       erwartung: z.string(),
-      expectedElements: z.array(ExpectedElementSchema).optional(),
       gewichtung: z.string().optional(),
       aktiv: z.boolean().optional(),
     }),
   ),
 });
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
 
 function applyCors(res: any) {
   Object.entries(corsHeaders).forEach(([key, value]) => {
@@ -52,15 +44,6 @@ function sendJson(res: any, status: number, payload: unknown) {
   applyCors(res);
   res.setHeader("Content-Type", "application/json");
   return res.status(status).json(payload);
-}
-
-function cleanJsonText(text: string): string {
-  return text
-    .trim()
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
 }
 
 export default async function handler(req: any, res: any) {
@@ -82,7 +65,7 @@ export default async function handler(req: any, res: any) {
 
     const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
     const imageBase64 = String(body.imageBase64 ?? "").trim();
-    const imageMimeType = String(body.imageMimeType ?? "").trim() || "image/png";
+    const imageMimeType = String(body.imageMimeType ?? "").trim();
     const fileName = String(body.fileName ?? "").trim();
 
     if (!expectationHorizonText && !imageBase64) {
@@ -106,8 +89,7 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, {
         ok: false,
         error: "UNSUPPORTED_FILE_TYPE",
-        message:
-          "Für die Rastererkennung werden aktuell nur Bilder, Text, Excel oder CSV unterstützt.",
+        message: "Für die Rastererkennung werden aktuell nur Bilder, Text, Excel oder CSV unterstützt.",
       });
     }
 
@@ -120,37 +102,65 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const openai = new OpenAI({ apiKey });
-
     const messages = imageBase64
       ? buildImageMessages(imageBase64, imageMimeType, fileName)
       : buildTextMessages(expectationHorizonText);
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages,
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages,
+      }),
     });
 
-    const raw = completion.choices?.[0]?.message?.content;
+    const raw = await response.text();
 
-    if (!raw || typeof raw !== "string") {
+    if (!response.ok) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "OPENAI_ERROR",
+        raw,
+      });
+    }
+
+    let parsedOpenAI: any;
+
+    try {
+      parsedOpenAI = JSON.parse(raw);
+    } catch {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "INVALID_OPENAI_RESPONSE",
+        raw,
+      });
+    }
+
+    const content = parsedOpenAI?.choices?.[0]?.message?.content;
+
+    if (!content || typeof content !== "string") {
       return sendJson(res, 500, {
         ok: false,
         error: "EMPTY_MODEL_RESPONSE",
+        parsedOpenAI,
       });
     }
 
     let modelJson: unknown;
 
     try {
-      modelJson = JSON.parse(cleanJsonText(raw));
+      modelJson = JSON.parse(content);
     } catch {
       return sendJson(res, 500, {
         ok: false,
         error: "MODEL_NOT_JSON",
-        content: raw,
+        content,
       });
     }
 
@@ -169,33 +179,20 @@ export default async function handler(req: any, res: any) {
       .map((criterion, index) => {
         const bereich = clean(criterion.bereich) || "Allgemein";
         const kriterium = clean(criterion.kriterium) || `Kriterium ${index + 1}`;
-        const expectedElements = normalizeExpectedElements(
-          criterion.expectedElements ?? [],
-        );
-        const erwartung =
-          clean(criterion.erwartung) || expectedElementsToText(expectedElements);
+        const erwartung = clean(criterion.erwartung);
         const beschreibung = clean(criterion.beschreibung);
 
         return {
           id: `crit-${index}`,
           bereich,
           kriterium,
-          beschreibung: buildDescription(
-            beschreibung,
-            erwartung,
-            expectedElements,
-            kriterium,
-          ),
+          beschreibung: buildConcreteDescription(beschreibung, erwartung, kriterium),
           erwartung,
-          expectedElements,
           gewichtung: clean(criterion.gewichtung ?? ""),
           aktiv: criterion.aktiv !== false,
         };
       })
-      .filter(
-        (criterion) =>
-          criterion.kriterium || criterion.beschreibung || criterion.erwartung,
-      );
+      .filter((criterion) => criterion.kriterium || criterion.beschreibung || criterion.erwartung);
 
     if (criteria.length === 0) {
       return sendJson(res, 500, {
@@ -208,14 +205,13 @@ export default async function handler(req: any, res: any) {
 
     return sendJson(res, 200, {
       ok: true,
-      summary: clean(result.data.summary ?? ""),
       criteria,
       debug: {
         count: criteria.length,
         inputType: imageBase64 ? imageMimeType : "text",
         fileName,
       },
-      usage: completion.usage ?? null,
+      usage: parsedOpenAI?.usage ?? null,
     });
   } catch (error: any) {
     return sendJson(res, 500, {
@@ -229,39 +225,35 @@ export default async function handler(req: any, res: any) {
 function buildTextMessages(expectationHorizonText: string) {
   return [
     {
-      role: "system" as const,
+      role: "system",
       content: SYSTEM_PROMPT,
     },
     {
-      role: "user" as const,
+      role: "user",
       content: buildPrompt(expectationHorizonText),
     },
   ];
 }
 
-function buildImageMessages(
-  imageBase64: string,
-  imageMimeType: string,
-  fileName: string,
-) {
+function buildImageMessages(imageBase64: string, imageMimeType: string, fileName: string) {
   return [
     {
-      role: "system" as const,
+      role: "system",
       content: SYSTEM_PROMPT,
     },
     {
-      role: "user" as const,
+      role: "user",
       content: [
         {
-          type: "text" as const,
+          type: "text",
           text: buildPrompt(
             `Das Bewertungsraster liegt als Bild vor. Dateiname: ${
               fileName || "unbekannt"
-            }. Lies den sichtbaren Text vollständig aus. Extrahiere daraus bewertbare Leistungseinheiten mit konkreten Untererwartungen.`,
+            }. Lies den sichtbaren Text vollständig aus. Extrahiere ausschließlich die dort sichtbaren konkreten Erwartungen.`,
           ),
         },
         {
-          type: "image_url" as const,
+          type: "image_url",
           image_url: {
             url: `data:${imageMimeType};base64,${imageBase64}`,
           },
@@ -274,33 +266,114 @@ function buildImageMessages(
 const SYSTEM_PROMPT = `
 Du extrahierst Bewertungsraster aus Erwartungshorizonten.
 
-Grundregel:
-Ein Kriterium ist eine bewertbare Leistungseinheit.
-Nicht jeder Unterpunkt ist automatisch ein eigenes Kriterium.
-
-Du unterscheidest:
-1. Kriterium = übergeordnete bewertbare Leistungseinheit
-2. expectedElements = konkrete Teilanforderungen innerhalb dieses Kriteriums
-
 Du darfst keine allgemeinen Kriterien erfinden.
 Du darfst keine pädagogischen Standardformulierungen erzeugen.
+Du darfst nicht zusammenfassen.
+Du darfst nicht bündeln.
 Du darfst keine konkreten Inhalte weglassen.
-Du darfst aber sinnvoll bündeln, wenn mehrere Unterpunkte gemeinsam eine einzige bewertbare Leistungseinheit bilden.
+
+Entscheidend:
+Das Feld "erwartung" enthält immer den konkreten erwarteten Inhalt.
+Das Feld "beschreibung" enthält ebenfalls den konkreten Inhalt, nicht nur eine abstrakte Prüfformulierung.
+
+Verbotene Beschreibungen:
+- "Die Textsorte wird korrekt genannt."
+- "Der Titel wird korrekt genannt."
+- "Der Autor wird korrekt genannt."
+- "Das Entstehungsjahr wird korrekt genannt."
+- "Die Einleitung ist vollständig."
+- "Die lyrische Form wird beschrieben."
+- "Die Strophe wird analysiert."
+- "Der Text ist logisch aufgebaut."
+- "Der Text ist verständlich."
+
+Stattdessen:
+- "Die Textsorte wird als Gedicht benannt."
+- "Der Titel wird als Der Pflaumenbaum benannt."
+- "Bertolt Brecht wird als Autor genannt."
+- "1933 wird als Entstehungsjahr genannt."
+- "Das Thema wird als Beschreibung eines kleinen Pflaumenbaums benannt."
+- "Der Inhalt benennt, dass ein kleiner Pflaumenbaum in einem Hof steht und nicht weiterwachsen kann."
+- "Strophe 1 beschreibt den Pflaumenbaum als unglaublich klein."
+- "Strophe 1 nennt das Gitter um den Baum."
+- "Strophe 1 deutet das Gitter auch als Schutz vor Tritten."
+- "Strophe 2 erklärt, dass der Pflaumenbaum nicht weiterwachsen kann."
+- "Strophe 2 nennt zu wenig Sonne im Hof als Grund."
+- "Die verkürzten Wortformen 'wer'n' und 's ist' werden als sprachliche Auffälligkeiten benannt."
+
+Wenn im Raster konkrete Begriffe, Namen, Jahreszahlen, Textstellen, Zitate oder Inhalte stehen, müssen diese in "erwartung" erhalten bleiben.
 
 Gib ausschließlich gültiges JSON zurück.
 `;
 
 function buildPrompt(text: string): string {
   return `
-Extrahiere aus dem folgenden Erwartungshorizont ein Bewertungsraster.
+Extrahiere aus dem folgenden Erwartungshorizont ein konkretes, kleinteiliges Bewertungsraster.
 
-ZENTRALE ENTSCHEIDUNG:
-Nicht jeder Spiegelstrich ist automatisch ein eigenes Kriterium.
-Ein Kriterium ist eine bewertbare Leistungseinheit.
-Konkrete Unterpunkte werden als expectedElements innerhalb dieses Kriteriums gespeichert.
+ZENTRALE REGEL:
+Der konkrete Inhalt muss erhalten bleiben.
+Nicht nur die Kategorie, sondern der erwartete Inhalt muss ausgegeben werden.
 
-Zusätzlich:
-Erstelle eine kurze summary in 2 bis 4 Sätzen. Diese summary soll knapp beschreiben, worum es im Erwartungshorizont geht und welche Leistungsschwerpunkte er setzt.
+FALSCH:
+{
+  "kriterium": "Titel",
+  "beschreibung": "Der Titel wird korrekt genannt.",
+  "erwartung": ""
+}
+
+RICHTIG:
+{
+  "kriterium": "Titel",
+  "beschreibung": "Der Titel wird als Der Pflaumenbaum benannt.",
+  "erwartung": "Der Pflaumenbaum"
+}
+
+FALSCH:
+{
+  "kriterium": "Autor",
+  "beschreibung": "Der Autor wird korrekt genannt.",
+  "erwartung": ""
+}
+
+RICHTIG:
+{
+  "kriterium": "Autor",
+  "beschreibung": "Bertolt Brecht wird als Autor genannt.",
+  "erwartung": "Bertolt Brecht"
+}
+
+FALSCH:
+{
+  "kriterium": "Beschreibung Strophe 1",
+  "beschreibung": "Die erste Strophe wird beschrieben.",
+  "erwartung": ""
+}
+
+RICHTIG:
+{
+  "kriterium": "Strophe 1: Pflaumenbaum als unglaublich klein",
+  "beschreibung": "Die erste Strophe beschreibt den Pflaumenbaum als unglaublich klein.",
+  "erwartung": "Pflaumenbaum als unglaublich klein"
+}
+
+ATOMISIERUNG:
+- Jede einzelne Angabe wird ein eigenes Kriterium.
+- Jede konkrete Information wird erhalten.
+- Jeder Spiegelstrich wird ein eigenes Kriterium.
+- Aufzählungen nach Doppelpunkt werden aufgeteilt.
+- Beispiele, Zitate, Versangaben und sprachliche Auffälligkeiten werden nicht ausgelassen.
+- Strukturangaben wie Einleitung, Interpretationshypothese, Hauptteil, Fazit bleiben als eigene Kriterien erhalten, wenn sie im Raster vorkommen.
+- Wenn ein Strukturpunkt einen konkreten Inhalt enthält, muss dieser Inhalt in "erwartung" stehen.
+
+BEREICHE:
+Übernimm vorhandene Bereiche wie:
+- Verstehensleistung
+- Darstellungsleistung
+- Inhalt
+- Sprache
+- Aufbau
+
+Wenn kein Bereich erkennbar ist, nutze "Allgemein".
 
 TEXT ODER BILDINHALT:
 ${text}
@@ -308,19 +381,12 @@ ${text}
 Gib ausschließlich JSON in exakt dieser Struktur zurück:
 
 {
-  "summary": "string",
   "criteria": [
     {
       "bereich": "string",
       "kriterium": "string",
       "beschreibung": "string",
       "erwartung": "string",
-      "expectedElements": [
-        {
-          "label": "string",
-          "erwartung": "string"
-        }
-      ],
       "gewichtung": "string",
       "aktiv": true
     }
@@ -330,45 +396,49 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
 AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
-- Maximal 30 Kriterien.
-- Lieber wenige intelligente Kriterien mit expectedElements als viele atomisierte Einzelpunkte.
-- Keine konkreten Inhalte auslassen.
+- Maximal 80 Kriterien.
+- "kriterium" ist kurz, aber konkret.
+- "beschreibung" enthält den konkreten erwarteten Inhalt.
+- "erwartung" enthält den konkreten Inhalt möglichst nah am Original.
+- Wenn der konkrete Inhalt nicht gelesen werden kann, schreibe in "erwartung": "nicht eindeutig lesbar".
 `;
 }
 
-function buildDescription(
-  description: string,
-  expectation: string,
-  expectedElements: { label: string; erwartung: string }[],
-  criterion: string,
-): string {
+function buildConcreteDescription(description: string, expectation: string, criterion: string): string {
   const d = clean(description);
   const e = clean(expectation);
 
-  if (d) return d;
+  if (!d && e) return e;
+  if (!e) return d || criterion;
 
-  if (expectedElements.length > 0) {
-    return `${criterion}: ${expectedElements
-      .map((item) => `${item.label}: ${item.erwartung}`)
-      .join("; ")}`;
+  const lowerDescription = d.toLowerCase();
+  const lowerExpectation = e.toLowerCase();
+
+  if (lowerDescription.includes(lowerExpectation)) {
+    return d;
   }
 
-  return e || criterion;
+  if (isGenericDescription(d)) {
+    return `${d} Erwartet: ${e}`;
+  }
+
+  return `${d} Erwartet: ${e}`;
 }
 
-function normalizeExpectedElements(
-  input: { label: string; erwartung: string }[],
-): { label: string; erwartung: string }[] {
-  return input
-    .map((item) => ({
-      label: clean(item.label),
-      erwartung: clean(item.erwartung),
-    }))
-    .filter((item) => item.label || item.erwartung);
-}
+function isGenericDescription(value: string): boolean {
+  const text = value.toLowerCase();
 
-function expectedElementsToText(input: { label: string; erwartung: string }[]) {
-  return input.map((item) => `${item.label}: ${item.erwartung}`).join("; ");
+  return (
+    text.includes("korrekt genannt") ||
+    text.includes("wird genannt") ||
+    text.includes("wird benannt") ||
+    text.includes("wird beschrieben") ||
+    text.includes("wird erklärt") ||
+    text.includes("wird erkannt") ||
+    text.includes("wird berücksichtigt") ||
+    text.includes("prüft, ob") ||
+    text.includes("soll")
+  );
 }
 
 function clean(value: unknown): string {
