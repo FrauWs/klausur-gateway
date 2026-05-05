@@ -1,5 +1,3 @@
-// sanitizeOutput.ts
-
 export function sanitizeOutput(text: string): string {
   const forbidden = [
     /\b\d+\s*(Punkte|von)\b/gi,
