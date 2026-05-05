@@ -8,13 +8,23 @@ declare const process: {
   };
 };
 
+type ExtractCriteriaRequestBody = {
+  expectationHorizonText?: string;
+  imageBase64?: string;
+  imageMimeType?: string;
+  fileName?: string;
+};
+
 const CriteriaSchema = z.object({
   criteria: z.array(
     z.object({
       bereich: z.string(),
       kriterium: z.string(),
       beschreibung: z.string(),
-    })
+      erwartung: z.string().optional(),
+      gewichtung: z.string().optional(),
+      aktiv: z.boolean().optional(),
+    }),
   ),
 });
 
@@ -25,7 +35,9 @@ const corsHeaders = {
 };
 
 function applyCors(res: any) {
-  Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
+  Object.entries(corsHeaders).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
 }
 
 function sendJson(res: any, status: number, payload: unknown) {
@@ -37,29 +49,55 @@ function sendJson(res: any, status: number, payload: unknown) {
 export default async function handler(req: any, res: any) {
   applyCors(res);
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
 
   if (req.method !== "POST") {
-    return sendJson(res, 405, { ok: false, error: "METHOD_NOT_ALLOWED" });
+    return sendJson(res, 405, {
+      ok: false,
+      error: "METHOD_NOT_ALLOWED",
+    });
   }
 
   try {
-    const text = String(req.body?.expectationHorizonText ?? "").trim();
+    const body = (req.body ?? {}) as ExtractCriteriaRequestBody;
 
-    if (!text) {
+    const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
+    const imageBase64 = String(body.imageBase64 ?? "").trim();
+    const imageMimeType = String(body.imageMimeType ?? "").trim();
+    const fileName = String(body.fileName ?? "").trim();
+
+    if (!expectationHorizonText && !imageBase64) {
       return sendJson(res, 400, {
         ok: false,
         error: "EMPTY_INPUT",
+        message: "Es wurde weder Rastertext noch Bildinhalt übergeben.",
+      });
+    }
+
+    if (imageBase64 && imageMimeType === "application/pdf") {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "PDF_NOT_SUPPORTED_IN_GATEWAY_YET",
+        message:
+          "PDF-Raster können aktuell nicht direkt im Gateway ausgelesen werden. Bitte als Bild, Excel, CSV oder Text hochladen.",
       });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
+
     if (!apiKey) {
       return sendJson(res, 500, {
         ok: false,
-        error: "NO_API_KEY",
+        error: "MISSING_API_KEY",
       });
     }
+
+    const messages =
+      imageBase64 && imageMimeType.startsWith("image/")
+        ? buildImageMessages(imageBase64, imageMimeType, fileName)
+        : buildTextMessages(expectationHorizonText);
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -71,23 +109,11 @@ export default async function handler(req: any, res: any) {
         model: "gpt-4.1-mini",
         temperature: 0,
         response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "Du extrahierst Bewertungsraster vollständig. Kein Zusammenfassen. Nur JSON.",
-          },
-          {
-            role: "user",
-            content: buildPrompt(text),
-          },
-        ],
+        messages,
       }),
     });
 
     const raw = await response.text();
-
-    console.log("RAW:", raw);
 
     if (!response.ok) {
       return sendJson(res, 500, {
@@ -97,9 +123,10 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    let parsed;
+    let parsedOpenAI: any;
+
     try {
-      parsed = JSON.parse(raw);
+      parsedOpenAI = JSON.parse(raw);
     } catch {
       return sendJson(res, 500, {
         ok: false,
@@ -108,19 +135,20 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const content = parsed?.choices?.[0]?.message?.content;
+    const content = parsedOpenAI?.choices?.[0]?.message?.content;
 
-    if (!content) {
+    if (!content || typeof content !== "string") {
       return sendJson(res, 500, {
         ok: false,
         error: "EMPTY_MODEL_RESPONSE",
-        parsed,
+        parsedOpenAI,
       });
     }
 
-    let json;
+    let modelJson: unknown;
+
     try {
-      json = JSON.parse(content);
+      modelJson = JSON.parse(content);
     } catch {
       return sendJson(res, 500, {
         ok: false,
@@ -129,58 +157,143 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const result = CriteriaSchema.safeParse(json);
+    const result = CriteriaSchema.safeParse(modelJson);
 
     if (!result.success) {
       return sendJson(res, 500, {
         ok: false,
         error: "INVALID_SCHEMA",
         issues: result.error.issues,
-        json,
+        modelJson,
+      });
+    }
+
+    const criteria = result.data.criteria
+      .map((criterion, index) => ({
+        id: `crit-${index}`,
+        bereich: clean(criterion.bereich) || "Allgemein",
+        kriterium: clean(criterion.kriterium) || `Kriterium ${index + 1}`,
+        beschreibung: clean(criterion.beschreibung) || clean(criterion.kriterium),
+        erwartung: clean(criterion.erwartung ?? criterion.beschreibung),
+        gewichtung: clean(criterion.gewichtung ?? ""),
+        aktiv: criterion.aktiv !== false,
+      }))
+      .filter((criterion) => criterion.kriterium || criterion.beschreibung);
+
+    if (criteria.length === 0) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "NO_CRITERIA_EXTRACTED",
+        message: "Es konnten keine Kriterien erkannt werden.",
       });
     }
 
     return sendJson(res, 200, {
       ok: true,
-      criteria: result.data.criteria,
+      criteria,
       debug: {
-        count: result.data.criteria.length,
+        count: criteria.length,
+        inputType: imageBase64 ? imageMimeType || "image" : "text",
+        fileName,
       },
+      usage: parsedOpenAI?.usage ?? null,
     });
-  } catch (e: any) {
+  } catch (error: any) {
     return sendJson(res, 500, {
       ok: false,
       error: "SERVER_ERROR",
-      message: e?.message,
+      message: error?.message ?? "Unbekannter Fehler.",
     });
   }
 }
 
-function buildPrompt(text: string) {
+function buildTextMessages(expectationHorizonText: string) {
+  return [
+    {
+      role: "system",
+      content:
+        "Du extrahierst Bewertungsraster aus Erwartungshorizonten. Du fasst nicht zusammen, bündelst keine Kriterien und gibst ausschließlich gültiges JSON zurück.",
+    },
+    {
+      role: "user",
+      content: buildPrompt(expectationHorizonText),
+    },
+  ];
+}
+
+function buildImageMessages(imageBase64: string, imageMimeType: string, fileName: string) {
+  return [
+    {
+      role: "system",
+      content:
+        "Du extrahierst Bewertungsraster aus Bildern von Erwartungshorizonten. Du fasst nicht zusammen, bündelst keine Kriterien und gibst ausschließlich gültiges JSON zurück.",
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: buildPrompt(
+            `Das Bewertungsraster liegt als Bilddatei vor. Dateiname: ${fileName || "unbekannt"}. Lies das Bild vollständig aus und extrahiere die Kriterien.`,
+          ),
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:${imageMimeType};base64,${imageBase64}`,
+          },
+        },
+      ],
+    },
+  ];
+}
+
+function buildPrompt(text: string): string {
   return `
 Extrahiere ein vollständiges Bewertungsraster.
 
 WICHTIG:
-- Jede Zeile = eigenes Kriterium
-- KEINE Zusammenfassung
-- KEIN Zusammenfassen mehrerer Punkte
-- Struktur erhalten
+- Jeder einzelne Spiegelstrich oder klar erkennbare Erwartungsaspekt wird als eigenes Kriterium übernommen.
+- Keine Zusammenfassung.
+- Keine Bündelung mehrerer Kriterien.
+- Keine neuen Kriterien erfinden.
+- Originalbegriffe möglichst erhalten.
+- Wenn Bereiche wie "Verstehensleistung", "Darstellungsleistung", "Inhalt", "Sprache", "Aufbau" erkennbar sind, ordne die Kriterien diesen Bereichen zu.
+- Falls kein Bereich erkennbar ist, nutze "Allgemein".
+- Gewichtungen nur übernehmen, wenn sie ausdrücklich genannt werden.
+- Keine Noten.
+- Keine Punkte vergeben.
 
-TEXT:
+TEXT ODER BILDINHALT:
 ${text}
 
-FORMAT:
+Gib ausschließlich JSON in exakt dieser Struktur zurück:
 
 {
   "criteria": [
     {
       "bereich": "string",
       "kriterium": "string",
-      "beschreibung": "string"
+      "beschreibung": "string",
+      "erwartung": "string",
+      "gewichtung": "string",
+      "aktiv": true
     }
   ]
 }
 
-Nur JSON.
+AUSGABEREGELN:
+- Kein Markdown.
+- Kein Text außerhalb des JSON.
+- Maximal 40 Kriterien.
+- "kriterium" ist kurz und präzise.
+- "beschreibung" beschreibt, was geprüft werden soll.
+- "erwartung" enthält möglichst nah am Originaltext die erwartete Leistung.
 `;
+}
+
+function clean(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
