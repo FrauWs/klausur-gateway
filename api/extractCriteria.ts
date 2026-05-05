@@ -21,7 +21,7 @@ const CriteriaSchema = z.object({
       bereich: z.string(),
       kriterium: z.string(),
       beschreibung: z.string(),
-      erwartung: z.string().optional(),
+      erwartung: z.string(),
       gewichtung: z.string().optional(),
       aktiv: z.boolean().optional(),
     }),
@@ -174,7 +174,7 @@ export default async function handler(req: any, res: any) {
         bereich: clean(criterion.bereich) || "Allgemein",
         kriterium: clean(criterion.kriterium) || `Kriterium ${index + 1}`,
         beschreibung: clean(criterion.beschreibung) || clean(criterion.kriterium),
-        erwartung: clean(criterion.erwartung ?? criterion.beschreibung),
+        erwartung: clean(criterion.erwartung || criterion.beschreibung),
         gewichtung: clean(criterion.gewichtung ?? ""),
         aktiv: criterion.aktiv !== false,
       }))
@@ -212,7 +212,7 @@ function buildTextMessages(expectationHorizonText: string) {
     {
       role: "system",
       content:
-        "Du extrahierst Bewertungsraster aus Erwartungshorizonten. Du fasst nicht zusammen, bündelst keine Kriterien und gibst ausschließlich gültiges JSON zurück.",
+        "Du extrahierst Bewertungsraster extrem genau und atomar. Du fasst nicht zusammen. Du bündelst keine Unterpunkte. Jeder Teilaspekt wird ein eigenes Kriterium. Du gibst ausschließlich gültiges JSON zurück.",
     },
     {
       role: "user",
@@ -226,7 +226,7 @@ function buildImageMessages(imageBase64: string, imageMimeType: string, fileName
     {
       role: "system",
       content:
-        "Du extrahierst Bewertungsraster aus Bildern von Erwartungshorizonten. Du fasst nicht zusammen, bündelst keine Kriterien und gibst ausschließlich gültiges JSON zurück.",
+        "Du liest Bewertungsraster aus Bildern extrem genau aus. Du extrahierst atomar. Du fasst nicht zusammen. Du bündelst keine Unterpunkte. Jeder Teilaspekt wird ein eigenes Kriterium. Du gibst ausschließlich gültiges JSON zurück.",
     },
     {
       role: "user",
@@ -234,7 +234,7 @@ function buildImageMessages(imageBase64: string, imageMimeType: string, fileName
         {
           type: "text",
           text: buildPrompt(
-            `Das Bewertungsraster liegt als Bilddatei vor. Dateiname: ${fileName || "unbekannt"}. Lies das Bild vollständig aus und extrahiere die Kriterien.`,
+            `Das Bewertungsraster liegt als Bilddatei vor. Dateiname: ${fileName || "unbekannt"}. Lies das Bild vollständig aus und extrahiere daraus ein atomar gegliedertes Bewertungsraster.`,
           ),
         },
         {
@@ -250,19 +250,36 @@ function buildImageMessages(imageBase64: string, imageMimeType: string, fileName
 
 function buildPrompt(text: string): string {
   return `
-Extrahiere ein vollständiges Bewertungsraster.
+Extrahiere aus dem folgenden Erwartungshorizont ein vollständiges, kleinteiliges Bewertungsraster.
 
-WICHTIG:
-- Jeder einzelne Spiegelstrich oder klar erkennbare Erwartungsaspekt wird als eigenes Kriterium übernommen.
-- Keine Zusammenfassung.
-- Keine Bündelung mehrerer Kriterien.
-- Keine neuen Kriterien erfinden.
-- Originalbegriffe möglichst erhalten.
-- Wenn Bereiche wie "Verstehensleistung", "Darstellungsleistung", "Inhalt", "Sprache", "Aufbau" erkennbar sind, ordne die Kriterien diesen Bereichen zu.
-- Falls kein Bereich erkennbar ist, nutze "Allgemein".
-- Gewichtungen nur übernehmen, wenn sie ausdrücklich genannt werden.
-- Keine Noten.
-- Keine Punkte vergeben.
+ZENTRALE REGEL:
+Du darfst NICHT zusammenfassen.
+Du darfst NICHT bündeln.
+Du darfst NICHT aus mehreren Anforderungen ein einziges Kriterium machen.
+
+ATOMISIERUNG:
+- Jeder Spiegelstrich wird ein eigenes Kriterium.
+- Jede einzelne geforderte Angabe wird ein eigenes Kriterium.
+- Jede Strophe, jeder Analyseaspekt, jede sprachliche Beobachtung wird ein eigenes Kriterium.
+- Beispiele mit "etwa", "z. B.", Doppelpunkten oder Aufzählungen werden in einzelne Kriterien aufgeteilt.
+- Wenn ein Satz mehrere Anforderungen enthält, wird er in mehrere Kriterien zerlegt.
+- Aus "vollständige Einleitung mit Textsorte, Titel, Autor, Entstehungsjahr, Thema, Inhalt" werden mindestens sechs Kriterien.
+- Aus "lyrische Form: Strophen, Verse, Reimschema" werden mindestens drei Kriterien.
+- Aus "Beschreibung und Deutung der Einzelstrophen" werden einzelne Kriterien pro Strophe und Teilaspekt.
+- Aus "sprachliche Besonderheiten" werden eigene Kriterien, wenn Beispiele genannt sind.
+
+BEREICHE:
+- Übernimm vorhandene Bereiche wie "Verstehensleistung", "Darstellungsleistung", "Inhalt", "Sprache", "Aufbau".
+- Wenn kein Bereich erkennbar ist, nutze "Allgemein".
+
+FORMULIERUNG:
+- "kriterium" ist kurz und konkret.
+- "beschreibung" beschreibt prüfbar, was im Schülertext vorhanden sein muss.
+- "erwartung" enthält den erwarteten Inhalt möglichst nah am Original.
+- Verwende keine generischen Formulierungen wie "Prüft, ob ...", wenn der Originalinhalt genauer ist.
+- Keine Bewertung.
+- Keine Note.
+- Keine Punkte.
 
 TEXT ODER BILDINHALT:
 ${text}
@@ -282,13 +299,16 @@ Gib ausschließlich JSON in exakt dieser Struktur zurück:
   ]
 }
 
+QUALITÄTSKONTROLLE VOR DER AUSGABE:
+- Prüfe, ob du Unterpunkte versehentlich gebündelt hast.
+- Wenn ja, teile sie vor der Ausgabe weiter auf.
+- Bei Aufzählungen müssen mehrere Kriterien entstehen.
+- Lieber mehr kleinteilige Kriterien als wenige grobe Kriterien.
+
 AUSGABEREGELN:
 - Kein Markdown.
 - Kein Text außerhalb des JSON.
-- Maximal 40 Kriterien.
-- "kriterium" ist kurz und präzise.
-- "beschreibung" beschreibt, was geprüft werden soll.
-- "erwartung" enthält möglichst nah am Originaltext die erwartete Leistung.
+- Maximal 60 Kriterien.
 `;
 }
 
