@@ -1,104 +1,378 @@
 // api/extractCriteria.ts
 
 import OpenAI from "openai";
+import { z } from "zod";
+
+declare const process: {
+  env: {
+    OPENAI_API_KEY?: string;
+  };
+};
+
+type ExtractCriteriaRequestBody = {
+  expectationHorizonText?: string;
+  imageBase64?: string;
+  imageMimeType?: string;
+  fileName?: string;
+};
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+const ExpectedElementSchema = z.object({
+  label: z.string(),
+  erwartung: z.string(),
+});
+
+const CriteriaSchema = z.object({
+  summary: z.string().optional(),
+  criteria: z.array(
+    z.object({
+      bereich: z.string(),
+      kriterium: z.string(),
+      beschreibung: z.string(),
+      erwartung: z.string(),
+      expectedElements: z.array(ExpectedElementSchema).optional(),
+      gewichtung: z.string().optional(),
+      aktiv: z.boolean().optional(),
+    }),
+  ),
+});
+
+function applyCors(res: any) {
+  Object.entries(corsHeaders).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
+}
+
+function sendJson(res: any, status: number, payload: unknown) {
+  applyCors(res);
+  res.setHeader("Content-Type", "application/json");
+  return res.status(status).json(payload);
+}
+
+function cleanJsonText(text: string): string {
+  return text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
 
 export default async function handler(req: any, res: any) {
-  // --- CORS ---
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  applyCors(res);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
+    return sendJson(res, 405, {
+      ok: false,
+      error: "METHOD_NOT_ALLOWED",
+    });
   }
 
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+    const body = (req.body ?? {}) as ExtractCriteriaRequestBody;
+
+    const expectationHorizonText = String(body.expectationHorizonText ?? "").trim();
+    const imageBase64 = String(body.imageBase64 ?? "").trim();
+    const imageMimeType = String(body.imageMimeType ?? "").trim() || "image/png";
+    const fileName = String(body.fileName ?? "").trim();
+
+    if (!expectationHorizonText && !imageBase64) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "EMPTY_INPUT",
+        message: "Es wurde weder Rastertext noch Bildinhalt übergeben.",
+      });
     }
 
-    const { expectationHorizonText } = req.body || {};
-
-    if (!expectationHorizonText) {
-      return res.status(400).json({ error: "No input text" });
+    if (imageBase64 && imageMimeType === "application/pdf") {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "PDF_NOT_SUPPORTED",
+        message:
+          "PDF-Dateien können in dieser Gateway-Version nicht direkt ausgelesen werden. Bitte das Raster als PNG/JPG-Screenshot hochladen oder als Text/Excel/CSV verwenden.",
+      });
     }
 
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    if (imageBase64 && !imageMimeType.startsWith("image/")) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "UNSUPPORTED_FILE_TYPE",
+        message:
+          "Für die Rastererkennung werden aktuell nur Bilder, Text, Excel oder CSV unterstützt.",
+      });
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    if (!apiKey) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "MISSING_API_KEY",
+      });
+    }
+
+    const openai = new OpenAI({ apiKey });
+
+    const messages = imageBase64
+      ? buildImageMessages(imageBase64, imageMimeType, fileName)
+      : buildTextMessages(expectationHorizonText);
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      temperature: 0.2,
+      temperature: 0,
       response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `
-Extrahiere Bewertungskriterien aus einem Erwartungshorizont.
+      messages,
+    });
 
-Gib JSON zurück:
+    const raw = completion.choices?.[0]?.message?.content;
+
+    if (!raw || typeof raw !== "string") {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "EMPTY_MODEL_RESPONSE",
+      });
+    }
+
+    let modelJson: unknown;
+
+    try {
+      modelJson = JSON.parse(cleanJsonText(raw));
+    } catch {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "MODEL_NOT_JSON",
+        content: raw,
+      });
+    }
+
+    const result = CriteriaSchema.safeParse(modelJson);
+
+    if (!result.success) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "INVALID_SCHEMA",
+        issues: result.error.issues,
+        modelJson,
+      });
+    }
+
+    const criteria = result.data.criteria
+      .map((criterion, index) => {
+        const bereich = clean(criterion.bereich) || "Allgemein";
+        const kriterium = clean(criterion.kriterium) || `Kriterium ${index + 1}`;
+        const expectedElements = normalizeExpectedElements(
+          criterion.expectedElements ?? [],
+        );
+        const erwartung =
+          clean(criterion.erwartung) || expectedElementsToText(expectedElements);
+        const beschreibung = clean(criterion.beschreibung);
+
+        return {
+          id: `crit-${index}`,
+          bereich,
+          kriterium,
+          beschreibung: buildDescription(
+            beschreibung,
+            erwartung,
+            expectedElements,
+            kriterium,
+          ),
+          erwartung,
+          expectedElements,
+          gewichtung: clean(criterion.gewichtung ?? ""),
+          aktiv: criterion.aktiv !== false,
+        };
+      })
+      .filter(
+        (criterion) =>
+          criterion.kriterium || criterion.beschreibung || criterion.erwartung,
+      );
+
+    if (criteria.length === 0) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "NO_CRITERIA_EXTRACTED",
+        message: "Es konnten keine Kriterien erkannt werden.",
+        modelJson,
+      });
+    }
+
+    return sendJson(res, 200, {
+      ok: true,
+      summary: clean(result.data.summary ?? ""),
+      criteria,
+      debug: {
+        count: criteria.length,
+        inputType: imageBase64 ? imageMimeType : "text",
+        fileName,
+      },
+      usage: completion.usage ?? null,
+    });
+  } catch (error: any) {
+    return sendJson(res, 500, {
+      ok: false,
+      error: "SERVER_ERROR",
+      message: error?.message ?? "Unbekannter Fehler.",
+    });
+  }
+}
+
+function buildTextMessages(expectationHorizonText: string) {
+  return [
+    {
+      role: "system" as const,
+      content: SYSTEM_PROMPT,
+    },
+    {
+      role: "user" as const,
+      content: buildPrompt(expectationHorizonText),
+    },
+  ];
+}
+
+function buildImageMessages(
+  imageBase64: string,
+  imageMimeType: string,
+  fileName: string,
+) {
+  return [
+    {
+      role: "system" as const,
+      content: SYSTEM_PROMPT,
+    },
+    {
+      role: "user" as const,
+      content: [
+        {
+          type: "text" as const,
+          text: buildPrompt(
+            `Das Bewertungsraster liegt als Bild vor. Dateiname: ${
+              fileName || "unbekannt"
+            }. Lies den sichtbaren Text vollständig aus. Extrahiere daraus bewertbare Leistungseinheiten mit konkreten Untererwartungen.`,
+          ),
+        },
+        {
+          type: "image_url" as const,
+          image_url: {
+            url: `data:${imageMimeType};base64,${imageBase64}`,
+          },
+        },
+      ],
+    },
+  ];
+}
+
+const SYSTEM_PROMPT = `
+Du extrahierst Bewertungsraster aus Erwartungshorizonten.
+
+Grundregel:
+Ein Kriterium ist eine bewertbare Leistungseinheit.
+Nicht jeder Unterpunkt ist automatisch ein eigenes Kriterium.
+
+Du unterscheidest:
+1. Kriterium = übergeordnete bewertbare Leistungseinheit
+2. expectedElements = konkrete Teilanforderungen innerhalb dieses Kriteriums
+
+Du darfst keine allgemeinen Kriterien erfinden.
+Du darfst keine pädagogischen Standardformulierungen erzeugen.
+Du darfst keine konkreten Inhalte weglassen.
+Du darfst aber sinnvoll bündeln, wenn mehrere Unterpunkte gemeinsam eine einzige bewertbare Leistungseinheit bilden.
+
+Gib ausschließlich gültiges JSON zurück.
+`;
+
+function buildPrompt(text: string): string {
+  return `
+Extrahiere aus dem folgenden Erwartungshorizont ein Bewertungsraster.
+
+ZENTRALE ENTSCHEIDUNG:
+Nicht jeder Spiegelstrich ist automatisch ein eigenes Kriterium.
+Ein Kriterium ist eine bewertbare Leistungseinheit.
+Konkrete Unterpunkte werden als expectedElements innerhalb dieses Kriteriums gespeichert.
+
+Zusätzlich:
+Erstelle eine kurze summary in 2 bis 4 Sätzen. Diese summary soll knapp beschreiben, worum es im Erwartungshorizont geht und welche Leistungsschwerpunkte er setzt.
+
+TEXT ODER BILDINHALT:
+${text}
+
+Gib ausschließlich JSON in exakt dieser Struktur zurück:
 
 {
-  "summary": "2-4 Sätze Zusammenfassung",
+  "summary": "string",
   "criteria": [
     {
-      "bereich": "...",
-      "kriterium": "...",
-      "beschreibung": "...",
-      "erwartung": "...",
-      "gewichtung": "...",
+      "bereich": "string",
+      "kriterium": "string",
+      "beschreibung": "string",
+      "erwartung": "string",
+      "expectedElements": [
+        {
+          "label": "string",
+          "erwartung": "string"
+        }
+      ],
+      "gewichtung": "string",
       "aktiv": true
     }
   ]
 }
 
-Regeln:
-- max. ca. 10–15 Kriterien
-- keine Mini-Zerlegung
-- keine Kommentare außerhalb JSON
-          `.trim(),
-        },
-        {
-          role: "user",
-          content: expectationHorizonText,
-        },
-      ],
-    });
+AUSGABEREGELN:
+- Kein Markdown.
+- Kein Text außerhalb des JSON.
+- Maximal 30 Kriterien.
+- Lieber wenige intelligente Kriterien mit expectedElements als viele atomisierte Einzelpunkte.
+- Keine konkreten Inhalte auslassen.
+`;
+}
 
-    const raw = completion.choices?.[0]?.message?.content;
+function buildDescription(
+  description: string,
+  expectation: string,
+  expectedElements: { label: string; erwartung: string }[],
+  criterion: string,
+): string {
+  const d = clean(description);
+  const e = clean(expectation);
 
-    if (!raw) {
-      return res.status(500).json({ error: "No AI response" });
-    }
+  if (d) return d;
 
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return res.status(500).json({ error: "Invalid JSON from AI", raw });
-    }
-
-    return res.status(200).json({
-      summary: parsed.summary || "",
-      criteria: (parsed.criteria || []).map((c: any, i: number) => ({
-        id: `criterion-${i + 1}`,
-        bereich: c.bereich || "",
-        kriterium: c.kriterium || "",
-        beschreibung: c.beschreibung || "",
-        erwartung: c.erwartung || "",
-        gewichtung: c.gewichtung || "",
-        aktiv: c.aktiv ?? true,
-      })),
-    });
-  } catch (err: any) {
-    return res.status(500).json({
-      error: "Server error",
-      message: err.message,
-    });
+  if (expectedElements.length > 0) {
+    return `${criterion}: ${expectedElements
+      .map((item) => `${item.label}: ${item.erwartung}`)
+      .join("; ")}`;
   }
+
+  return e || criterion;
+}
+
+function normalizeExpectedElements(
+  input: { label: string; erwartung: string }[],
+): { label: string; erwartung: string }[] {
+  return input
+    .map((item) => ({
+      label: clean(item.label),
+      erwartung: clean(item.erwartung),
+    }))
+    .filter((item) => item.label || item.erwartung);
+}
+
+function expectedElementsToText(input: { label: string; erwartung: string }[]) {
+  return input.map((item) => `${item.label}: ${item.erwartung}`).join("; ");
+}
+
+function clean(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
