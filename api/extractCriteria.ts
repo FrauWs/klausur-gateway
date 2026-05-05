@@ -1,3 +1,5 @@
+// api/extractCriteria.ts
+
 declare const process: {
   env: {
     OPENAI_API_KEY?: string;
@@ -36,9 +38,11 @@ export default async function handler(req: any, res: any) {
 
   try {
     const body = req.body ?? {};
-    const text = String(body.expectationHorizonText ?? "").trim();
 
-    if (!text) {
+    const text = String(body.expectationHorizonText ?? "").trim();
+    const imageBase64 = body.imageBase64;
+
+    if (!text && !imageBase64) {
       return sendJson(res, 400, {
         ok: false,
         error: "EMPTY_INPUT",
@@ -54,7 +58,11 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const prompt = buildPrompt(text);
+    const isOCR = !!imageBase64;
+
+    const prompt = isOCR
+      ? buildOCRPrompt()
+      : buildTextPrompt(text);
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -69,8 +77,7 @@ export default async function handler(req: any, res: any) {
         messages: [
           {
             role: "system",
-            content:
-              "Du extrahierst präzise Bewertungsraster aus Erwartungshorizonten. Keine Vereinfachung. Kein Zusammenfassen.",
+            content: "Extrahiere ein vollständiges Bewertungsraster. Nur JSON.",
           },
           {
             role: "user",
@@ -88,20 +95,9 @@ export default async function handler(req: any, res: any) {
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content ?? "{}";
 
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      return sendJson(res, 500, {
-        ok: false,
-        error: "INVALID_JSON",
-        raw: content,
-      });
-    }
-
     return sendJson(res, 200, {
       ok: true,
-      criteria: parsed.criteria ?? [],
+      criteria: JSON.parse(content).criteria ?? [],
     });
   } catch (e: any) {
     return sendJson(res, 500, {
@@ -111,49 +107,22 @@ export default async function handler(req: any, res: any) {
   }
 }
 
-/* ============================================================
-   🔥 DER ENTSCHEIDENDE TEIL
-   ============================================================ */
+/* ================================
+   PROMPTS
+================================ */
 
-function buildPrompt(text: string) {
+function buildTextPrompt(text: string) {
   return `
-Extrahiere ein Bewertungsraster aus dem folgenden Erwartungshorizont.
+Extrahiere ein vollständiges Bewertungsraster aus diesem Erwartungshorizont.
 
 WICHTIG:
-Du darfst NICHT verallgemeinern.
-Du darfst NICHT zusammenfassen.
+- Jeder Spiegelstrich = eigenes Kriterium
+- KEIN Zusammenfassen
+- KEIN Generalisieren
+- Wortlaut möglichst nah am Original
 
-❌ VERBOTEN:
-- "Prüft, ob ..."
-- "Es wird erwartet ..."
-- "Analyse der Strophe"
-- abstrakte Kriterien
-
-✅ STATT DESSEN:
-Jeder konkrete Inhalt wird eigenes Kriterium.
-
-BEISPIEL:
-
-Aus:
-"Einleitung enthält: Textsorte Gedicht, Titel Der Pflaumenbaum, Autor Brecht"
-
-Wird:
-- Textsorte: Gedicht
-- Titel: Der Pflaumenbaum
-- Autor: Bertolt Brecht
-
-STROPHEN:
-Jeder einzelne Punkt wird eigenes Kriterium.
-
-BEISPIEL:
-- Strophe 1: Baum ist klein
-- Strophe 1: Baum ist von Gitter umgeben
-- Strophe 1: Gitter schützt vor Tritten
-
-STRUKTUR:
-- Interpretationshypothese ist eigenes Kriterium
-- Fazit ist eigenes Kriterium
-- Reihenfolge berücksichtigen
+TEXT:
+${text}
 
 FORMAT:
 
@@ -162,14 +131,34 @@ FORMAT:
     {
       "bereich": "string",
       "kriterium": "string",
-      "beschreibung": "konkreter erwarteter Inhalt",
-      "expectedElements": ["string"],
-      "weighting": ""
+      "beschreibung": "string"
     }
   ]
 }
+`;
+}
 
-TEXT:
-${text}
+function buildOCRPrompt() {
+  return `
+Das Bild enthält einen Erwartungshorizont.
+
+Extrahiere daraus ein Bewertungsraster.
+
+REGELN:
+- Jeder einzelne Punkt wird ein Kriterium
+- KEINE Zusammenfassung
+- Original möglichst beibehalten
+
+FORMAT:
+
+{
+  "criteria": [
+    {
+      "bereich": "string",
+      "kriterium": "string",
+      "beschreibung": "string"
+    }
+  ]
+}
 `;
 }
