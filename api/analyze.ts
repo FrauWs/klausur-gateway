@@ -56,16 +56,6 @@ function normalizeCriteria(input: any): any[] {
   }));
 }
 
-function buildCompactRaster(criteria: any[]) {
-  return criteria
-    .slice(0, 15)
-    .map((criterion) => ({
-      id: criterion.id,
-      kriterium: criterion.kriterium.slice(0, 120),
-      erwartung: criterion.erwartung.slice(0, 300),
-    }));
-}
-
 export default async function handler(req: any, res: any) {
   setCors(res);
 
@@ -75,7 +65,6 @@ export default async function handler(req: any, res: any) {
 
   if (req.method !== "POST") {
     return sendJson(res, 405, {
-      ok: false,
       error: "METHOD_NOT_ALLOWED",
     });
   }
@@ -85,7 +74,6 @@ export default async function handler(req: any, res: any) {
 
     if (!apiKey) {
       return sendJson(res, 500, {
-        ok: false,
         error: "MISSING_API_KEY",
       });
     }
@@ -105,7 +93,6 @@ export default async function handler(req: any, res: any) {
 
     if (!studentText || criteria.length === 0) {
       return sendJson(res, 400, {
-        ok: false,
         error: "MISSING_INPUT",
         debug: {
           receivedKeys: Object.keys(body),
@@ -115,39 +102,34 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // 🔥 MASSIV REDUZIEREN
-    const compactRaster = buildCompactRaster(criteria);
-
-    // 🔥 SCHÜLERTEXT KÜRZEN
-    const shortenedStudentText = studentText.slice(0, 12000);
+    const compactRaster = criteria.slice(0, 15);
 
     const prompt = `
 Bewerte den Schülertext anhand des Bewertungsrasters.
 
 REGELN:
-- Nur auf Basis des Textes bewerten.
-- Keine Halluzinationen.
-- Kurz und konkret bleiben.
-- Maximal 2 kurze Sätze pro Kriterium.
+- Kurz bleiben
+- Keine Halluzination
+- Nur auf Basis des Textes bewerten
 
 RASTER:
 ${JSON.stringify(compactRaster)}
 
 SCHÜLERTEXT:
-${shortenedStudentText}
+${studentText.slice(0, 12000)}
 
 Gib ausschließlich JSON zurück:
 
 {
-  "bewertungen": [
+  "results": [
     {
       "criterionId": "string",
-      "kriterium": "string",
-      "einschaetzung": "erfüllt | teilweise | nicht erfüllt",
-      "begründung": "string"
+      "criterion": "string",
+      "status": "erfüllt | teilweise | nicht erfüllt",
+      "comment": "string"
     }
   ],
-  "gesamtKommentar": "string"
+  "summary": "string"
 }
 `.trim();
 
@@ -173,9 +155,7 @@ Gib ausschließlich JSON zurück:
 
     if (!openAiResponse.ok) {
       return sendJson(res, 500, {
-        ok: false,
         error: "OPENAI_ERROR",
-        status: openAiResponse.status,
         raw,
       });
     }
@@ -186,7 +166,6 @@ Gib ausschließlich JSON zurück:
       parsedOpenAi = JSON.parse(raw);
     } catch {
       return sendJson(res, 500, {
-        ok: false,
         error: "OPENAI_RESPONSE_NOT_JSON",
         raw,
       });
@@ -196,7 +175,6 @@ Gib ausschließlich JSON zurück:
 
     if (!outputText) {
       return sendJson(res, 500, {
-        ok: false,
         error: "EMPTY_MODEL_RESPONSE",
       });
     }
@@ -207,24 +185,22 @@ Gib ausschließlich JSON zurück:
       modelJson = JSON.parse(outputText);
     } catch {
       return sendJson(res, 500, {
-        ok: false,
         error: "MODEL_NOT_JSON",
         outputText,
       });
     }
 
+    const results = Array.isArray(modelJson?.results)
+      ? modelJson.results
+      : [];
+
     return sendJson(res, 200, {
-      ok: true,
-      ...modelJson,
-      debug: {
-        criteriaCount: compactRaster.length,
-        originalCriteriaCount: criteria.length,
-        studentTextLength: shortenedStudentText.length,
-      },
+      results,
+      summary: clean(modelJson?.summary),
+      usage: parsedOpenAi?.usage ?? null,
     });
   } catch (error: any) {
     return sendJson(res, 500, {
-      ok: false,
       error: "SERVER_ERROR",
       message: error?.message ?? String(error),
     });
