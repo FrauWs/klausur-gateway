@@ -23,19 +23,14 @@ function clean(value: unknown): string {
 }
 
 function extractOutputText(response: any): string {
-  if (typeof response?.output_text === "string") {
-    return response.output_text;
-  }
+  if (typeof response?.output_text === "string") return response.output_text;
 
   const output = Array.isArray(response?.output) ? response.output : [];
 
   for (const item of output) {
     const content = Array.isArray(item?.content) ? item.content : [];
-
     for (const part of content) {
-      if (typeof part?.text === "string") {
-        return part.text;
-      }
+      if (typeof part?.text === "string") return part.text;
     }
   }
 
@@ -49,10 +44,30 @@ function normalizeCriteria(input: any): any[] {
       ? input.criteria
       : [];
 
-  return raw.map((criterion: any, index: number) => ({
-    id: clean(criterion?.id) || `crit-${index}`,
-    kriterium: clean(criterion?.kriterium) || `Kriterium ${index + 1}`,
-    erwartung: clean(criterion?.erwartung),
+  return raw.map((criterion: any, index: number) => {
+    const expectedElements = Array.isArray(criterion?.expectedElements)
+      ? criterion.expectedElements.slice(0, 10)
+      : [];
+
+    return {
+      id: clean(criterion?.id) || `crit-${index}`,
+      bereich: clean(criterion?.bereich) || "Allgemein",
+      kriterium: clean(criterion?.kriterium) || `Kriterium ${index + 1}`,
+      beschreibung: clean(criterion?.beschreibung),
+      erwartung: clean(criterion?.erwartung),
+      expectedElements,
+    };
+  });
+}
+
+function buildCompactRaster(criteria: any[]) {
+  return criteria.slice(0, 18).map((criterion) => ({
+    id: criterion.id,
+    bereich: criterion.bereich,
+    kriterium: criterion.kriterium,
+    beschreibung: criterion.beschreibung.slice(0, 500),
+    erwartung: criterion.erwartung.slice(0, 700),
+    expectedElements: criterion.expectedElements,
   }));
 }
 
@@ -84,7 +99,9 @@ export default async function handler(req: any, res: any) {
       clean(body.studentText) ||
       clean(body.cleanedStudentText) ||
       clean(body.analysisText) ||
-      clean(body.text);
+      clean(body.text) ||
+      clean(body.transcription) ||
+      clean(body.klausurText);
 
     const criteria =
       normalizeCriteria(body.criteria).length > 0
@@ -97,36 +114,54 @@ export default async function handler(req: any, res: any) {
         debug: {
           receivedKeys: Object.keys(body),
           hasStudentText: Boolean(studentText),
+          studentTextLength: studentText.length,
           criteriaCount: criteria.length,
         },
       });
     }
 
-    const compactRaster = criteria.slice(0, 15);
+    const compactRaster = buildCompactRaster(criteria);
+    const shortenedStudentText = studentText.slice(0, 14000);
 
     const prompt = `
-Bewerte den Schülertext anhand des Bewertungsrasters.
+Analysiere den Schülertext anhand des Bewertungsrasters.
+
+WICHTIG ZU TEXTBELEGEN:
+- Für jedes Kriterium musst du im Schülertext nach passenden Stellen suchen.
+- Wenn eine Stelle vorhanden ist, zitiere sie wörtlich oder nahezu wörtlich.
+- Der Textbeleg darf NICHT leer sein, wenn der Kommentar sich auf eine konkrete Leistung bezieht.
+- Schreibe NICHT "Kein eindeutiger Textbeleg gefunden", wenn im Schülertext ein passender Satz oder Teilsatz vorhanden ist.
+- Wenn mehrere Stellen passen, nenne 1 bis 2 kurze Textbelege.
+- Nur wenn wirklich keine passende Stelle existiert, schreibe: "Kein belegbarer Textbezug im Schülertext."
 
 REGELN:
-- Kurz bleiben
-- Keine Halluzination
-- Nur auf Basis des Textes bewerten
+- Bewerte nur auf Basis des Schülertexts.
+- Erfinde keine Leistung.
+- Prüfe jedes Kriterium einzeln.
+- Nutze erwartung und expectedElements.
+- Formuliere knapp, aber konkret.
+- Gib ausschließlich JSON zurück.
 
 RASTER:
 ${JSON.stringify(compactRaster)}
 
 SCHÜLERTEXT:
-${studentText.slice(0, 12000)}
+${shortenedStudentText}
 
-Gib ausschließlich JSON zurück:
+Gib exakt diese JSON-Struktur zurück:
 
 {
   "results": [
     {
       "criterionId": "string",
       "criterion": "string",
-      "status": "erfüllt | teilweise | nicht erfüllt",
-      "comment": "string"
+      "status": "erfüllt | teilweise | nicht erfüllt | nicht beurteilbar",
+      "comment": "string",
+      "textbezug": "kurzer konkreter Textbeleg aus dem Schülertext",
+      "textbeleg": "kurzer konkreter Textbeleg aus dem Schülertext",
+      "evidence": "kurzer konkreter Textbeleg aus dem Schülertext",
+      "quote": "kurzer konkreter Textbeleg aus dem Schülertext",
+      "confidence": "hoch | mittel | niedrig"
     }
   ],
   "summary": "string"
@@ -156,6 +191,7 @@ Gib ausschließlich JSON zurück:
     if (!openAiResponse.ok) {
       return sendJson(res, 500, {
         error: "OPENAI_ERROR",
+        status: openAiResponse.status,
         raw,
       });
     }
@@ -191,13 +227,36 @@ Gib ausschließlich JSON zurück:
     }
 
     const results = Array.isArray(modelJson?.results)
-      ? modelJson.results
+      ? modelJson.results.map((item: any) => {
+          const evidence =
+            clean(item?.textbezug) ||
+            clean(item?.textbeleg) ||
+            clean(item?.evidence) ||
+            clean(item?.quote) ||
+            "Kein belegbarer Textbezug im Schülertext.";
+
+          return {
+            criterionId: clean(item?.criterionId),
+            criterion: clean(item?.criterion),
+            status: clean(item?.status),
+            comment: clean(item?.comment),
+            textbezug: evidence,
+            textbeleg: evidence,
+            evidence,
+            quote: evidence,
+            confidence: clean(item?.confidence) || "mittel",
+          };
+        })
       : [];
 
     return sendJson(res, 200, {
       results,
       summary: clean(modelJson?.summary),
       usage: parsedOpenAi?.usage ?? null,
+      debug: {
+        criteriaCount: compactRaster.length,
+        studentTextLength: shortenedStudentText.length,
+      },
     });
   } catch (error: any) {
     return sendJson(res, 500, {
