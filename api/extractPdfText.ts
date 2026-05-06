@@ -19,9 +19,11 @@ function sendJson(res: any, status: number, payload: unknown) {
 function stripDataUrl(value: string): string {
   const cleaned = String(value ?? "").trim();
   const commaIndex = cleaned.indexOf(",");
+
   if (cleaned.startsWith("data:") && commaIndex >= 0) {
     return cleaned.slice(commaIndex + 1);
   }
+
   return cleaned;
 }
 
@@ -50,7 +52,10 @@ export default async function handler(req: any, res: any) {
 
   try {
     const { fileBase64, imageBase64, fileName } = req.body ?? {};
-    const base64 = stripDataUrl(String(fileBase64 ?? imageBase64 ?? ""));
+
+    const base64 = stripDataUrl(
+      String(fileBase64 ?? imageBase64 ?? ""),
+    );
 
     if (!base64) {
       return sendJson(res, 400, {
@@ -65,6 +70,7 @@ export default async function handler(req: any, res: any) {
     const pdfParse = pdfParseModule.default ?? pdfParseModule;
 
     const result = await pdfParse(buffer);
+
     const text = cleanText(result?.text ?? "");
 
     return sendJson(res, 200, {
