@@ -1,9 +1,7 @@
 // api/transcribeHandwriting.ts
 
-declare const process: {
-  env: {
-    OPENAI_API_KEY?: string;
-  };
+export const config = {
+  maxDuration: 60,
 };
 
 type TranscribeRequestBody = {
@@ -12,26 +10,20 @@ type TranscribeRequestBody = {
   fileName?: string;
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-
-function applyCors(res: any) {
-  Object.entries(corsHeaders).forEach(([key, value]) => {
-    res.setHeader(key, value);
-  });
+function setCors(res: any) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 function sendJson(res: any, status: number, payload: unknown) {
-  applyCors(res);
+  setCors(res);
   res.setHeader("Content-Type", "application/json");
   return res.status(status).json(payload);
 }
 
 export default async function handler(req: any, res: any) {
-  applyCors(res);
+  setCors(res);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -45,37 +37,6 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const body = (req.body ?? {}) as TranscribeRequestBody;
-
-    const imageBase64 = String(body.imageBase64 ?? "").trim();
-    const imageMimeType = String(body.imageMimeType ?? "").trim();
-    const fileName = String(body.fileName ?? "").trim();
-
-    if (!imageBase64) {
-      return sendJson(res, 400, {
-        ok: false,
-        error: "EMPTY_INPUT",
-        message: "Es wurde kein Bildinhalt übergeben.",
-      });
-    }
-
-    if (imageMimeType === "application/pdf") {
-      return sendJson(res, 400, {
-        ok: false,
-        error: "PDF_NOT_SUPPORTED",
-        message:
-          "PDF-Dateien können in dieser Gateway-Version nicht direkt transkribiert werden. Bitte als PNG/JPG-Screenshot hochladen.",
-      });
-    }
-
-    if (!imageMimeType.startsWith("image/")) {
-      return sendJson(res, 400, {
-        ok: false,
-        error: "UNSUPPORTED_FILE_TYPE",
-        message: "Für die Transkription werden aktuell nur Bilder unterstützt.",
-      });
-    }
-
     const apiKey = process.env.OPENAI_API_KEY;
 
     if (!apiKey) {
@@ -85,141 +46,176 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const body = (req.body ?? {}) as TranscribeRequestBody;
+
+    const fileBase64 = String(body.imageBase64 ?? "").trim();
+    const fileMimeType = String(body.imageMimeType ?? "").trim() || "image/png";
+    const fileName = String(body.fileName ?? "").trim() || "Schülertext";
+
+    if (!fileBase64) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "EMPTY_INPUT",
+        message: "Es wurde keine Datei übergeben.",
+      });
+    }
+
+    const isPdf = fileMimeType === "application/pdf";
+    const isImage = fileMimeType.startsWith("image/");
+
+    if (!isPdf && !isImage) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "UNSUPPORTED_FILE_TYPE",
+        message: "Unterstützt werden PDF, PNG und JPG.",
+      });
+    }
+
+    const payload = buildOpenAiPayload({
+      fileBase64,
+      fileMimeType,
+      fileName,
+    });
+
+    const openAiResponse = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "Du transkribierst handschriftliche Schülertexte. Du gibst ausschließlich gültiges JSON zurück. Du bewertest nicht. Du korrigierst nicht. Du glättest nicht. Du übernimmst erkennbare Fehler, Zeilenumbrüche und Unsicherheiten möglichst genau.",
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: buildPrompt(fileName),
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${imageMimeType};base64,${imageBase64}`,
-                },
-              },
-            ],
-          },
-        ],
-      }),
+      body: JSON.stringify(payload),
     });
 
-    const raw = await response.text();
+    const raw = await openAiResponse.text();
 
-    if (!response.ok) {
+    if (!openAiResponse.ok) {
       return sendJson(res, 500, {
         ok: false,
         error: "OPENAI_ERROR",
+        status: openAiResponse.status,
         raw,
       });
     }
 
-    let parsedOpenAI: any;
+    let parsedOpenAi: any;
 
     try {
-      parsedOpenAI = JSON.parse(raw);
+      parsedOpenAi = JSON.parse(raw);
     } catch {
       return sendJson(res, 500, {
         ok: false,
-        error: "INVALID_OPENAI_RESPONSE",
+        error: "OPENAI_RESPONSE_NOT_JSON",
         raw,
       });
     }
 
-    const content = parsedOpenAI?.choices?.[0]?.message?.content;
+    const text = extractOutputText(parsedOpenAi).trim();
 
-    if (!content || typeof content !== "string") {
+    if (!text) {
       return sendJson(res, 500, {
         ok: false,
-        error: "EMPTY_MODEL_RESPONSE",
-        parsedOpenAI,
-      });
-    }
-
-    let modelJson: any;
-
-    try {
-      modelJson = JSON.parse(content);
-    } catch {
-      return sendJson(res, 500, {
-        ok: false,
-        error: "MODEL_NOT_JSON",
-        content,
-      });
-    }
-
-    const transcription = String(modelJson?.transcription ?? "").trim();
-
-    if (!transcription) {
-      return sendJson(res, 500, {
-        ok: false,
-        error: "NO_TRANSCRIPTION",
-        message: "Es konnte keine Transkription erzeugt werden.",
-        modelJson,
+        error: "EMPTY_TRANSCRIPTION",
+        parsedOpenAi,
       });
     }
 
     return sendJson(res, 200, {
       ok: true,
-      transcription,
-      warnings: Array.isArray(modelJson?.warnings) ? modelJson.warnings : [],
+      text,
+      transcription: text,
       debug: {
-        inputType: imageMimeType,
+        inputType: fileMimeType,
         fileName,
-        length: transcription.length,
+        textLength: text.length,
       },
-      usage: parsedOpenAI?.usage ?? null,
+      usage: parsedOpenAi?.usage ?? null,
     });
   } catch (error: any) {
     return sendJson(res, 500, {
       ok: false,
       error: "SERVER_ERROR",
-      message: error?.message ?? "Unbekannter Fehler.",
+      message: error?.message ?? String(error),
     });
   }
 }
 
-function buildPrompt(fileName: string): string {
-  return `
-Transkribiere den handschriftlichen Schülertext im Bild.
+function buildOpenAiPayload(params: {
+  fileBase64: string;
+  fileMimeType: string;
+  fileName: string;
+}) {
+  const { fileBase64, fileMimeType, fileName } = params;
 
-DATEI:
-${fileName || "unbekannt"}
+  const content: any[] = [
+    {
+      type: "input_text",
+      text: `
+Transkribiere den gesamten sichtbaren Text aus der Datei.
 
-REGELN:
-- Gib den erkennbaren Schülertext möglichst wortgetreu wieder.
-- Korrigiere keine Rechtschreibung.
-- Korrigiere keine Grammatik.
-- Ergänze keine fehlenden Wörter.
-- Erfinde keine Inhalte.
-- Übernimm Zeilenumbrüche sinnvoll.
-- Wenn ein Wort nicht sicher lesbar ist, markiere es mit [unleserlich].
-- Wenn ein Wort unsicher ist, markiere es mit [?] direkt hinter dem Wort.
-- Randnotizen, Lehrpersonenkommentare, Stempel oder Scan-App-Hinweise nicht in den Schülertext übernehmen.
+Regeln:
+- Schreibe nur den Text ab.
 - Keine Bewertung.
 - Keine Analyse.
+- Keine Verbesserung.
+- Keine Zusammenfassung.
+- Behalte Absätze möglichst bei.
+- Wenn etwas unleserlich ist, schreibe [unleserlich].
+- Bei mehrseitigen PDFs: transkribiere alle Seiten in Reihenfolge.
+`.trim(),
+    },
+  ];
 
-Gib ausschließlich JSON in exakt dieser Struktur zurück:
+  if (fileMimeType === "application/pdf") {
+    content.push({
+      type: "input_file",
+      filename: fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`,
+      file_data: `data:application/pdf;base64,${stripDataUrl(fileBase64)}`,
+    });
+  } else if (fileMimeType.startsWith("image/")) {
+    content.push({
+      type: "input_image",
+      image_url: `data:${fileMimeType};base64,${stripDataUrl(fileBase64)}`,
+    });
+  }
 
-{
-  "transcription": "string",
-  "warnings": ["string"]
+  return {
+    model: "gpt-4.1-mini",
+    temperature: 0,
+    input: [
+      {
+        role: "user",
+        content,
+      },
+    ],
+  };
 }
-`;
+
+function extractOutputText(response: any): string {
+  if (typeof response?.output_text === "string") {
+    return response.output_text;
+  }
+
+  const output = Array.isArray(response?.output) ? response.output : [];
+
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const part of content) {
+      if (typeof part?.text === "string") {
+        return part.text;
+      }
+    }
+  }
+
+  return "";
+}
+
+function stripDataUrl(value: string): string {
+  const cleaned = String(value ?? "").trim();
+  const commaIndex = cleaned.indexOf(",");
+
+  if (cleaned.startsWith("data:") && commaIndex >= 0) {
+    return cleaned.slice(commaIndex + 1);
+  }
+
+  return cleaned;
 }
