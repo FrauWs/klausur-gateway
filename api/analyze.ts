@@ -4,20 +4,79 @@ export const config = {
   maxDuration: 60,
 };
 
-type Body = {
-  studentText?: string;
-  raster?: any;
-};
-
 function setCors(res: any) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-function send(res: any, status: number, data: any) {
+function sendJson(res: any, status: number, payload: unknown) {
   setCors(res);
-  res.status(status).json(data);
+  res.setHeader("Content-Type", "application/json");
+  return res.status(status).json(payload);
+}
+
+function clean(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractOutputText(response: any): string {
+  if (typeof response?.output_text === "string") return response.output_text;
+
+  const output = Array.isArray(response?.output) ? response.output : [];
+
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const part of content) {
+      if (typeof part?.text === "string") return part.text;
+    }
+  }
+
+  return "";
+}
+
+function normalizeCriteria(input: any): any[] {
+  const raw = Array.isArray(input)
+    ? input
+    : Array.isArray(input?.criteria)
+      ? input.criteria
+      : Array.isArray(input?.raster?.criteria)
+        ? input.raster.criteria
+        : [];
+
+  return raw.map((criterion: any, index: number) => {
+    const expectedElements = Array.isArray(criterion?.expectedElements)
+      ? criterion.expectedElements
+      : [];
+
+    const elementText = expectedElements
+      .map((item: any) => `${clean(item?.label)}: ${clean(item?.erwartung)}`)
+      .filter(Boolean)
+      .join("; ");
+
+    return {
+      id: clean(criterion?.id) || `crit-${index}`,
+      bereich: clean(criterion?.bereich) || "Allgemein",
+      kriterium: clean(criterion?.kriterium) || `Kriterium ${index + 1}`,
+      erwartung: clean(criterion?.erwartung) || elementText,
+      beschreibung: clean(criterion?.beschreibung),
+      expectedElements,
+    };
+  });
+}
+
+function buildCompactRaster(criteria: any[]) {
+  return criteria.map((criterion) => ({
+    id: criterion.id,
+    bereich: criterion.bereich,
+    kriterium: criterion.kriterium,
+    erwartung: criterion.erwartung,
+    expectedElements: Array.isArray(criterion.expectedElements)
+      ? criterion.expectedElements.slice(0, 12)
+      : [],
+  }));
 }
 
 export default async function handler(req: any, res: any) {
@@ -28,32 +87,65 @@ export default async function handler(req: any, res: any) {
   }
 
   if (req.method !== "POST") {
-    return send(res, 405, { error: "METHOD_NOT_ALLOWED" });
+    return sendJson(res, 405, {
+      ok: false,
+      error: "METHOD_NOT_ALLOWED",
+    });
   }
 
   try {
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return send(res, 500, { error: "NO_API_KEY" });
 
-    const { studentText, raster } = req.body || {};
-
-    if (!studentText || !raster) {
-      return send(res, 400, { error: "MISSING_INPUT" });
+    if (!apiKey) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "MISSING_API_KEY",
+      });
     }
 
-    // 🔥 EXTREM WICHTIG: Raster massiv kürzen
-    const compactRaster = raster.criteria.map((c: any) => ({
-      kriterium: c.kriterium,
-      erwartung: c.erwartung.slice(0, 300), // hart kürzen
-    }));
+    const body = req.body ?? {};
+
+    const studentText =
+      clean(body.studentText) ||
+      clean(body.cleanedStudentText) ||
+      clean(body.analysisText) ||
+      clean(body.text) ||
+      clean(body.submissionText) ||
+      clean(body.klausurText);
+
+    const criteria =
+      normalizeCriteria(body.criteria).length > 0
+        ? normalizeCriteria(body.criteria)
+        : normalizeCriteria(body.raster).length > 0
+          ? normalizeCriteria(body.raster)
+          : normalizeCriteria(body.rubric).length > 0
+            ? normalizeCriteria(body.rubric)
+            : normalizeCriteria(body.expectationRaster);
+
+    if (!studentText || criteria.length === 0) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "MISSING_INPUT",
+        debug: {
+          receivedKeys: Object.keys(body),
+          hasStudentText: Boolean(studentText),
+          criteriaCount: criteria.length,
+        },
+      });
+    }
+
+    const compactRaster = buildCompactRaster(criteria);
 
     const prompt = `
-Bewerte den Schülertext anhand des Rasters.
+Analysiere den Schülertext anhand des Bewertungsrasters.
 
-REGELN:
-- Nur auf Basis des Textes bewerten
-- Keine Halluzination
-- Kurz und konkret bleiben
+Regeln:
+- Nutze ausschließlich den Schülertext und das Raster.
+- Erfinde keine Leistungen.
+- Prüfe jedes Kriterium einzeln.
+- Berücksichtige expectedElements, wenn vorhanden.
+- Formuliere knapp, aber konkret.
+- Gib ausschließlich JSON zurück.
 
 RASTER:
 ${JSON.stringify(compactRaster)}
@@ -61,48 +153,99 @@ ${JSON.stringify(compactRaster)}
 SCHÜLERTEXT:
 ${studentText}
 
-Gib JSON zurück:
+JSON-Struktur:
 
 {
   "bewertungen": [
     {
+      "criterionId": "string",
       "kriterium": "string",
-      "erfüllt": true/false,
-      "begründung": "string"
+      "einschaetzung": "erfüllt | teilweise | nicht erfüllt | nicht beurteilbar",
+      "begründung": "string",
+      "textbezug": "string"
     }
-  ]
+  ],
+  "gesamtKommentar": "string"
 }
-`;
+`.trim();
 
-    const response = await fetch("https://api.openai.com/v1/responses", {
+    const openAiResponse = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "gpt-4.1-mini", // 🔥 wichtig für Speed
+        model: "gpt-4.1-mini",
         temperature: 0,
         input: prompt,
-        text: { format: { type: "json_object" } },
+        text: {
+          format: {
+            type: "json_object",
+          },
+        },
       }),
     });
 
-    const raw = await response.text();
+    const raw = await openAiResponse.text();
 
-    if (!response.ok) {
-      return send(res, 500, { error: "OPENAI_ERROR", raw });
+    if (!openAiResponse.ok) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "OPENAI_ERROR",
+        status: openAiResponse.status,
+        raw,
+      });
     }
 
-    let parsed;
+    let parsedOpenAi: any;
+
     try {
-      parsed = JSON.parse(raw);
+      parsedOpenAi = JSON.parse(raw);
     } catch {
-      return send(res, 500, { error: "PARSE_ERROR", raw });
+      return sendJson(res, 500, {
+        ok: false,
+        error: "OPENAI_RESPONSE_NOT_JSON",
+        raw,
+      });
     }
 
-    return send(res, 200, parsed);
-  } catch (err: any) {
-    return send(res, 500, { error: err.message });
+    const outputText = extractOutputText(parsedOpenAi);
+
+    if (!outputText) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "EMPTY_MODEL_RESPONSE",
+        parsedOpenAi,
+      });
+    }
+
+    let modelJson: any;
+
+    try {
+      modelJson = JSON.parse(outputText);
+    } catch {
+      return sendJson(res, 500, {
+        ok: false,
+        error: "MODEL_NOT_JSON",
+        outputText,
+      });
+    }
+
+    return sendJson(res, 200, {
+      ok: true,
+      ...modelJson,
+      debug: {
+        criteriaCount: criteria.length,
+        studentTextLength: studentText.length,
+      },
+      usage: parsedOpenAi?.usage ?? null,
+    });
+  } catch (error: any) {
+    return sendJson(res, 500, {
+      ok: false,
+      error: "SERVER_ERROR",
+      message: error?.message ?? String(error),
+    });
   }
 }
