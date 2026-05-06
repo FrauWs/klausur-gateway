@@ -1,67 +1,78 @@
+// api/extractPdfText.ts
+
 import pdfParse from "pdf-parse";
 
 export const config = {
-  runtime: "nodejs",
   maxDuration: 30,
 };
 
+function setCors(res: any) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+function sendJson(res: any, status: number, payload: unknown) {
+  setCors(res);
+  res.setHeader("Content-Type", "application/json");
+  return res.status(status).json(payload);
+}
+
 export default async function handler(req: any, res: any) {
+  setCors(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
-    return res.status(405).json({
+    return sendJson(res, 405, {
       ok: false,
       error: "METHOD_NOT_ALLOWED",
     });
   }
 
   try {
-    const {
-      imageBase64,
-      imageMimeType,
-      fileName,
-    } = req.body ?? {};
+    const { imageBase64, imageMimeType, fileName } = req.body ?? {};
 
     if (!imageBase64) {
-      return res.status(400).json({
+      return sendJson(res, 400, {
         ok: false,
         error: "NO_FILE",
       });
     }
 
     if (imageMimeType !== "application/pdf") {
-      return res.status(400).json({
+      return sendJson(res, 400, {
         ok: false,
         error: "INVALID_MIME_TYPE",
       });
     }
 
-    const buffer = Buffer.from(imageBase64, "base64");
-
+    const buffer = Buffer.from(String(imageBase64), "base64");
     const parsed = await pdfParse(buffer);
 
     const text = String(parsed.text ?? "")
-      .replace(/\s+/g, " ")
+      .replace(/\u0000/g, "")
+      .replace(/\r/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
       .trim();
 
-    console.log("PDF_PARSE_RESULT", {
-      fileName,
-      textLength: text.length,
-      preview: text.slice(0, 1000),
-    });
-
-    return res.status(200).json({
+    return sendJson(res, 200, {
       ok: true,
       text,
       debug: {
-        fileName,
+        fileName: String(fileName ?? "upload.pdf"),
         textLength: text.length,
+        pages: parsed.numpages ?? null,
       },
     });
   } catch (error: any) {
-    console.error("PDF_PARSE_ERROR", error);
-
-    return res.status(500).json({
+    return sendJson(res, 500, {
       ok: false,
-      error: error?.message ?? "PDF_PARSE_FAILED",
+      error: "PDF_PARSE_FAILED",
+      message: error?.message ?? String(error),
     });
   }
 }
