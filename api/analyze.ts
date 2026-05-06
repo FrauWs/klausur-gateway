@@ -23,14 +23,19 @@ function clean(value: unknown): string {
 }
 
 function extractOutputText(response: any): string {
-  if (typeof response?.output_text === "string") return response.output_text;
+  if (typeof response?.output_text === "string") {
+    return response.output_text;
+  }
 
   const output = Array.isArray(response?.output) ? response.output : [];
 
   for (const item of output) {
     const content = Array.isArray(item?.content) ? item.content : [];
+
     for (const part of content) {
-      if (typeof part?.text === "string") return part.text;
+      if (typeof part?.text === "string") {
+        return part.text;
+      }
     }
   }
 
@@ -42,41 +47,23 @@ function normalizeCriteria(input: any): any[] {
     ? input
     : Array.isArray(input?.criteria)
       ? input.criteria
-      : Array.isArray(input?.raster?.criteria)
-        ? input.raster.criteria
-        : [];
-
-  return raw.map((criterion: any, index: number) => {
-    const expectedElements = Array.isArray(criterion?.expectedElements)
-      ? criterion.expectedElements
       : [];
 
-    const elementText = expectedElements
-      .map((item: any) => `${clean(item?.label)}: ${clean(item?.erwartung)}`)
-      .filter(Boolean)
-      .join("; ");
-
-    return {
-      id: clean(criterion?.id) || `crit-${index}`,
-      bereich: clean(criterion?.bereich) || "Allgemein",
-      kriterium: clean(criterion?.kriterium) || `Kriterium ${index + 1}`,
-      erwartung: clean(criterion?.erwartung) || elementText,
-      beschreibung: clean(criterion?.beschreibung),
-      expectedElements,
-    };
-  });
+  return raw.map((criterion: any, index: number) => ({
+    id: clean(criterion?.id) || `crit-${index}`,
+    kriterium: clean(criterion?.kriterium) || `Kriterium ${index + 1}`,
+    erwartung: clean(criterion?.erwartung),
+  }));
 }
 
 function buildCompactRaster(criteria: any[]) {
-  return criteria.map((criterion) => ({
-    id: criterion.id,
-    bereich: criterion.bereich,
-    kriterium: criterion.kriterium,
-    erwartung: criterion.erwartung,
-    expectedElements: Array.isArray(criterion.expectedElements)
-      ? criterion.expectedElements.slice(0, 12)
-      : [],
-  }));
+  return criteria
+    .slice(0, 15)
+    .map((criterion) => ({
+      id: criterion.id,
+      kriterium: criterion.kriterium.slice(0, 120),
+      erwartung: criterion.erwartung.slice(0, 300),
+    }));
 }
 
 export default async function handler(req: any, res: any) {
@@ -109,18 +96,12 @@ export default async function handler(req: any, res: any) {
       clean(body.studentText) ||
       clean(body.cleanedStudentText) ||
       clean(body.analysisText) ||
-      clean(body.text) ||
-      clean(body.submissionText) ||
-      clean(body.klausurText);
+      clean(body.text);
 
     const criteria =
       normalizeCriteria(body.criteria).length > 0
         ? normalizeCriteria(body.criteria)
-        : normalizeCriteria(body.raster).length > 0
-          ? normalizeCriteria(body.raster)
-          : normalizeCriteria(body.rubric).length > 0
-            ? normalizeCriteria(body.rubric)
-            : normalizeCriteria(body.expectationRaster);
+        : normalizeCriteria(body.raster);
 
     if (!studentText || criteria.length === 0) {
       return sendJson(res, 400, {
@@ -134,35 +115,36 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    // 🔥 MASSIV REDUZIEREN
     const compactRaster = buildCompactRaster(criteria);
 
-    const prompt = `
-Analysiere den Schülertext anhand des Bewertungsrasters.
+    // 🔥 SCHÜLERTEXT KÜRZEN
+    const shortenedStudentText = studentText.slice(0, 12000);
 
-Regeln:
-- Nutze ausschließlich den Schülertext und das Raster.
-- Erfinde keine Leistungen.
-- Prüfe jedes Kriterium einzeln.
-- Berücksichtige expectedElements, wenn vorhanden.
-- Formuliere knapp, aber konkret.
-- Gib ausschließlich JSON zurück.
+    const prompt = `
+Bewerte den Schülertext anhand des Bewertungsrasters.
+
+REGELN:
+- Nur auf Basis des Textes bewerten.
+- Keine Halluzinationen.
+- Kurz und konkret bleiben.
+- Maximal 2 kurze Sätze pro Kriterium.
 
 RASTER:
 ${JSON.stringify(compactRaster)}
 
 SCHÜLERTEXT:
-${studentText}
+${shortenedStudentText}
 
-JSON-Struktur:
+Gib ausschließlich JSON zurück:
 
 {
   "bewertungen": [
     {
       "criterionId": "string",
       "kriterium": "string",
-      "einschaetzung": "erfüllt | teilweise | nicht erfüllt | nicht beurteilbar",
-      "begründung": "string",
-      "textbezug": "string"
+      "einschaetzung": "erfüllt | teilweise | nicht erfüllt",
+      "begründung": "string"
     }
   ],
   "gesamtKommentar": "string"
@@ -216,7 +198,6 @@ JSON-Struktur:
       return sendJson(res, 500, {
         ok: false,
         error: "EMPTY_MODEL_RESPONSE",
-        parsedOpenAi,
       });
     }
 
@@ -236,10 +217,10 @@ JSON-Struktur:
       ok: true,
       ...modelJson,
       debug: {
-        criteriaCount: criteria.length,
-        studentTextLength: studentText.length,
+        criteriaCount: compactRaster.length,
+        originalCriteriaCount: criteria.length,
+        studentTextLength: shortenedStudentText.length,
       },
-      usage: parsedOpenAi?.usage ?? null,
     });
   } catch (error: any) {
     return sendJson(res, 500, {
