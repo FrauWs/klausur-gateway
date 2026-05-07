@@ -7,6 +7,7 @@ declare const process: {
 };
 
 export const config = {
+  runtime: "nodejs",
   maxDuration: 30,
 };
 
@@ -93,10 +94,18 @@ function dedupeElements(input: ExpectedElement[]): ExpectedElement[] {
     if (seen.has(key)) continue;
 
     seen.add(key);
-    output.push({ label, erwartung });
+
+    output.push({
+      label,
+      erwartung,
+    });
   }
 
   return output;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function removeExpectedElementsFromDescription(
@@ -110,11 +119,17 @@ function removeExpectedElementsFromDescription(
     const erwartung = cleanOneLine(element.erwartung);
 
     if (label) {
-      result = result.replace(new RegExp(escapeRegExp(label), "gi"), "");
+      result = result.replace(
+        new RegExp(escapeRegExp(label), "gi"),
+        "",
+      );
     }
 
     if (erwartung && erwartung.length > 12) {
-      result = result.replace(new RegExp(escapeRegExp(erwartung), "gi"), "");
+      result = result.replace(
+        new RegExp(escapeRegExp(erwartung), "gi"),
+        "",
+      );
     }
   }
 
@@ -123,14 +138,12 @@ function removeExpectedElementsFromDescription(
     .trim();
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function normalizeCriteria(rawCriteria: any[]): Criterion[] {
   return rawCriteria
     .map((criterion, index) => {
-      const rawExpectedElements = Array.isArray(criterion?.expectedElements)
+      const rawExpectedElements = Array.isArray(
+        criterion?.expectedElements,
+      )
         ? criterion.expectedElements
         : [];
 
@@ -156,18 +169,28 @@ function normalizeCriteria(rawCriteria: any[]): Criterion[] {
       );
 
       const rawDescription = cleanOneLine(
-        criterion?.beschreibung ?? criterion?.description ?? "",
+        criterion?.beschreibung ??
+          criterion?.description ??
+          "",
       );
 
       const beschreibung =
-        removeExpectedElementsFromDescription(rawDescription, expectedElements) ||
-        kriterium;
+        removeExpectedElementsFromDescription(
+          rawDescription,
+          expectedElements,
+        ) || kriterium;
 
       const erwartung =
-        cleanOneLine(criterion?.erwartung ?? criterion?.expected ?? "") ||
+        cleanOneLine(
+          criterion?.erwartung ??
+            criterion?.expected ??
+            "",
+        ) ||
         expectedElements
           .map((item) =>
-            [item.label, item.erwartung].filter(Boolean).join(": "),
+            [item.label, item.erwartung]
+              .filter(Boolean)
+              .join(": "),
           )
           .join("; ");
 
@@ -183,11 +206,17 @@ function normalizeCriteria(rawCriteria: any[]): Criterion[] {
         beschreibung,
         erwartung: cleanOneLine(erwartung),
         expectedElements,
-        gewichtung: cleanOneLine(criterion?.gewichtung ?? "mittel"),
+        gewichtung: cleanOneLine(
+          criterion?.gewichtung ?? "mittel",
+        ),
         aktiv: criterion?.aktiv !== false,
       };
     })
-    .filter((criterion) => criterion.kriterium && criterion.beschreibung);
+    .filter(
+      (criterion) =>
+        criterion.kriterium &&
+        criterion.beschreibung,
+    );
 }
 
 export default async function handler(req: any, res: any) {
@@ -215,12 +244,23 @@ export default async function handler(req: any, res: any) {
     }
 
     const body = req.body ?? {};
-    const expectationHorizonText = clean(body.expectationHorizonText ?? "");
 
-    if (!expectationHorizonText) {
+    const expectationHorizonText = clean(
+      body.expectationHorizonText ?? "",
+    );
+
+    const imageBase64 = clean(
+      body.imageBase64 ?? "",
+    );
+
+    const imageMimeType = clean(
+      body.imageMimeType ?? "image/png",
+    );
+
+    if (!expectationHorizonText && !imageBase64) {
       return sendJson(res, 400, {
         ok: false,
-        error: "NO_TEXT",
+        error: "NO_INPUT",
       });
     }
 
@@ -231,81 +271,90 @@ Ziel:
 Ein sauberes Raster für Lehrpersonen.
 
 Wichtig:
-- Nutze ausschließlich den gegebenen Text.
-- Erfinde keine Kriterien.
-- Wiederhole keine Inhalte.
-- Schreibe keine langen Fließtexte.
-- Schreibe NICHT "Konkrete Anforderungen".
-- Schreibe NICHT "Erwartet".
-- Schreibe NICHT "Du hast".
-- Die Beschreibung ist nur eine kurze Funktionsbeschreibung des Kriteriums.
-- Konkrete Inhalte gehören ausschließlich in expectedElements.
-- expectedElements sind kurze, konkrete Einzelpunkte.
+- Nutze ausschließlich den gegebenen Inhalt.
+- Keine Wiederholungen.
+- Keine langen Fließtexte.
+- Keine Formulierungen wie:
+  "Konkrete Anforderungen"
+  "Erwartet"
+  "Du hast"
+- Beschreibungen kurz halten.
+- Konkrete Inhalte nur in expectedElements.
+- expectedElements nur als kurze Stichpunkte.
 - Maximal 16 Kriterien.
-- Wenn Strophen einzeln im Raster stehen, lege sie getrennt an.
-- Wenn Einleitung, Form, Deutung, Aussageabsicht und Darstellung getrennt stehen, lege sie getrennt an.
+- JSON ONLY.
 
-Gutes Beispiel:
-{
-  "bereich": "Verstehensleistung",
-  "kriterium": "Lyrische Form",
-  "beschreibung": "Die formale Gestaltung des Gedichts wird beschrieben.",
-  "erwartung": "Strophenzahl, Verszahl und Reimschema werden korrekt benannt.",
-  "expectedElements": [
-    { "label": "Strophen", "erwartung": "drei Strophen" },
-    { "label": "Verse", "erwartung": "jeweils vier Verse" },
-    { "label": "Reimschema", "erwartung": "Paarreime in den ersten beiden Strophen, Kreuzreim in der dritten Strophe" }
-  ],
-  "gewichtung": "mittel",
-  "aktiv": true
-}
-
-JSON-Format:
+Beispiel:
 {
   "criteria": [
     {
-      "bereich": "string",
-      "kriterium": "string",
-      "beschreibung": "string",
-      "erwartung": "string",
+      "bereich": "Verstehensleistung",
+      "kriterium": "Lyrische Form",
+      "beschreibung": "Die formale Gestaltung wird beschrieben.",
+      "erwartung": "Strophenanzahl und Reimschema werden korrekt benannt.",
       "expectedElements": [
         {
-          "label": "string",
-          "erwartung": "string"
+          "label": "Strophen",
+          "erwartung": "drei Strophen"
+        },
+        {
+          "label": "Reimschema",
+          "erwartung": "Paarreim und Kreuzreim"
         }
       ],
-      "gewichtung": "string",
+      "gewichtung": "mittel",
       "aktiv": true
     }
   ]
 }
 
-Rastertext:
+TEXT:
 ${expectationHorizonText.slice(0, 12000)}
 `.trim();
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const userMessage = imageBase64
+      ? {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: prompt,
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${imageMimeType};base64,${imageBase64}`,
+              },
+            },
+          ],
+        }
+      : {
+          role: "user",
+          content: prompt,
+        };
+
+    const response = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          temperature: 0,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Du extrahierst Bewertungsraster quellentreu und antwortest ausschließlich mit validem JSON.",
+            },
+            userMessage,
+          ],
+        }),
       },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        temperature: 0,
-        messages: [
-          {
-            role: "system",
-            content:
-              "Du extrahierst Bewertungsraster quellentreu und gibst ausschließlich valides JSON zurück.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-      }),
-    });
+    );
 
     const raw = await response.text();
 
@@ -319,11 +368,16 @@ ${expectationHorizonText.slice(0, 12000)}
     }
 
     const completion = JSON.parse(raw);
-    const content = completion?.choices?.[0]?.message?.content ?? "{}";
+
+    const content =
+      completion?.choices?.[0]?.message?.content ?? "{}";
+
     const parsed = extractJsonObject(content);
 
     const criteria = normalizeCriteria(
-      Array.isArray(parsed.criteria) ? parsed.criteria : [],
+      Array.isArray(parsed.criteria)
+        ? parsed.criteria
+        : [],
     );
 
     if (criteria.length === 0) {
@@ -340,7 +394,9 @@ ${expectationHorizonText.slice(0, 12000)}
       criteria,
       debug: {
         count: criteria.length,
-        sourceTextLength: expectationHorizonText.length,
+        sourceTextLength:
+          expectationHorizonText.length,
+        imageMode: Boolean(imageBase64),
       },
       usage: completion?.usage ?? null,
     });
