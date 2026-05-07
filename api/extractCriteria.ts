@@ -56,15 +56,8 @@ function clean(value: unknown): string {
 
 function cleanOneLine(value: unknown): string {
   return String(value ?? "")
-    .replace(/Konkrete Anforderungen:?/gi, "")
-    .replace(/Erwartet:?/gi, "")
-    .replace(/^Du hast\s+/i, "")
-    .replace(/^Du schreibst\s+/i, "")
-    .replace(/^Du belegst\s+/i, "")
-    .replace(/^Du beachtest\s+/i, "")
-    .replace(/^Du formulierst\s+/i, "")
     .replace(/\s+/g, " ")
-    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/\s+([,.;:!?])/g, "$1")
     .trim();
 }
 
@@ -79,76 +72,15 @@ function extractJsonObject(raw: string): any {
   return JSON.parse(raw.slice(start, end + 1));
 }
 
-function dedupeElements(input: ExpectedElement[]): ExpectedElement[] {
-  const seen = new Set<string>();
-  const output: ExpectedElement[] = [];
-
-  for (const item of input) {
-    const label = cleanOneLine(item.label);
-    const erwartung = cleanOneLine(item.erwartung);
-
-    if (!label && !erwartung) continue;
-
-    const key = `${label}|${erwartung}`.toLowerCase();
-
-    if (seen.has(key)) continue;
-
-    seen.add(key);
-
-    output.push({
-      label,
-      erwartung,
-    });
-  }
-
-  return output;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function removeExpectedElementsFromDescription(
-  description: string,
-  expectedElements: ExpectedElement[],
-): string {
-  let result = cleanOneLine(description);
-
-  for (const element of expectedElements) {
-    const label = cleanOneLine(element.label);
-    const erwartung = cleanOneLine(element.erwartung);
-
-    if (label) {
-      result = result.replace(
-        new RegExp(escapeRegExp(label), "gi"),
-        "",
-      );
-    }
-
-    if (erwartung && erwartung.length > 12) {
-      result = result.replace(
-        new RegExp(escapeRegExp(erwartung), "gi"),
-        "",
-      );
-    }
-  }
-
-  return cleanOneLine(result)
-    .replace(/[:;,.]\s*$/g, "")
-    .trim();
-}
-
 function normalizeCriteria(rawCriteria: any[]): Criterion[] {
   return rawCriteria
     .map((criterion, index) => {
-      const rawExpectedElements = Array.isArray(
-        criterion?.expectedElements,
-      )
+      const rawExpectedElements = Array.isArray(criterion?.expectedElements)
         ? criterion.expectedElements
         : [];
 
-      const expectedElements = dedupeElements(
-        rawExpectedElements.map((item: any) => ({
+      const expectedElements: ExpectedElement[] = rawExpectedElements
+        .map((item: any) => ({
           label: cleanOneLine(item?.label ?? ""),
           erwartung: cleanOneLine(
             item?.erwartung ??
@@ -157,69 +89,42 @@ function normalizeCriteria(rawCriteria: any[]): Criterion[] {
               item?.beschreibung ??
               "",
           ),
-        })),
-      );
-
-      const kriterium = cleanOneLine(
-        criterion?.kriterium ??
-          criterion?.criterion ??
-          criterion?.title ??
-          criterion?.name ??
-          `Kriterium ${index + 1}`,
-      );
-
-      const rawDescription = cleanOneLine(
-        criterion?.beschreibung ??
-          criterion?.description ??
-          "",
-      );
-
-      const beschreibung =
-        removeExpectedElementsFromDescription(
-          rawDescription,
-          expectedElements,
-        ) || kriterium;
-
-      const erwartung =
-        cleanOneLine(
-          criterion?.erwartung ??
-            criterion?.expected ??
-            "",
-        ) ||
-        expectedElements
-          .map((item) =>
-            [item.label, item.erwartung]
-              .filter(Boolean)
-              .join(": "),
-          )
-          .join("; ");
+        }))
+        .filter((item) => item.label || item.erwartung);
 
       return {
-        id: `crit-${index}`,
-        bereich: cleanOneLine(
-          criterion?.bereich ??
-            criterion?.area ??
-            criterion?.category ??
-            "Allgemein",
+        id: cleanOneLine(criterion?.id) || `crit-${index}`,
+        bereich:
+          cleanOneLine(
+            criterion?.bereich ??
+              criterion?.area ??
+              criterion?.category ??
+              "",
+          ) || "Allgemein",
+        kriterium:
+          cleanOneLine(
+            criterion?.kriterium ??
+              criterion?.criterion ??
+              criterion?.title ??
+              criterion?.name ??
+              "",
+          ) || `Kriterium ${index + 1}`,
+        beschreibung: cleanOneLine(
+          criterion?.beschreibung ?? criterion?.description ?? "",
         ),
-        kriterium,
-        beschreibung,
-        erwartung: cleanOneLine(erwartung),
+        erwartung: cleanOneLine(
+          criterion?.erwartung ?? criterion?.expected ?? "",
+        ),
         expectedElements,
-        gewichtung: cleanOneLine(
-          criterion?.gewichtung ?? "mittel",
-        ),
+        gewichtung: cleanOneLine(criterion?.gewichtung ?? criterion?.weighting ?? ""),
         aktiv: criterion?.aktiv !== false,
       };
     })
-    .filter(
-      (criterion) =>
-        criterion.kriterium &&
-        criterion.beschreibung,
-    );
+    .filter((criterion) => criterion.kriterium && criterion.beschreibung);
 }
 
 export default async function handler(req: any, res: any) {
+  const startedAt = Date.now();
   applyCors(res);
 
   if (req.method === "OPTIONS") {
@@ -245,17 +150,10 @@ export default async function handler(req: any, res: any) {
 
     const body = req.body ?? {};
 
-    const expectationHorizonText = clean(
-      body.expectationHorizonText ?? "",
-    );
-
-    const imageBase64 = clean(
-      body.imageBase64 ?? "",
-    );
-
-    const imageMimeType = clean(
-      body.imageMimeType ?? "image/png",
-    );
+    const expectationHorizonText = clean(body.expectationHorizonText ?? "");
+    const imageBase64 = clean(body.imageBase64 ?? "");
+    const imageMimeType = clean(body.imageMimeType ?? "image/png");
+    const fileName = clean(body.fileName ?? "Erwartungshorizont");
 
     if (!expectationHorizonText && !imageBase64) {
       return sendJson(res, 400, {
@@ -264,79 +162,87 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    const sourceText =
+      expectationHorizonText.length > 18000
+        ? expectationHorizonText.slice(0, 18000)
+        : expectationHorizonText;
+
     const prompt = `
-Du extrahierst ein deutsches Bewertungsraster aus einem Erwartungshorizont.
+Du extrahierst ein Bewertungsraster aus einem Erwartungshorizont.
 
-Ziel:
-Ein sauberes Raster für Lehrpersonen.
+Arbeite allgemein und quellentreu.
+Der Erwartungshorizont kann sehr gut, schlecht strukturiert, lang, kurz, tabellarisch, stichpunktartig, unsauber oder unvollständig sein.
 
-Wichtig:
-- Nutze ausschließlich den gegebenen Inhalt.
-- Keine Wiederholungen.
-- Keine langen Fließtexte.
-- Keine Formulierungen wie:
-  "Konkrete Anforderungen"
-  "Erwartet"
-  "Du hast"
-- Beschreibungen kurz halten.
-- Konkrete Inhalte nur in expectedElements.
-- expectedElements nur als kurze Stichpunkte.
-- Maximal 16 Kriterien.
-- JSON ONLY.
+Aufgabe:
+Erzeuge daraus ein verwendbares Bewertungsraster für eine Lehrperson.
 
-Beispiel:
+Regeln:
+- Nutze ausschließlich Inhalte aus dem gelieferten Erwartungshorizont.
+- Erfinde keine fachlichen Inhalte.
+- Übernimm keine personenbezogenen Daten.
+- Fasse Redundanzen zusammen.
+- Erhalte fachlich konkrete Anforderungen.
+- Trenne erkennbare Bereiche, Kriterien und Unteranforderungen.
+- Wenn der Erwartungshorizont klare Teilbereiche enthält, übernimm diese als "bereich".
+- Wenn keine klaren Bereiche vorhanden sind, bilde sinnvolle allgemeine Bereiche.
+- Beschreibung: kurz, verständlich, funktional.
+- erwartung: knappe Zusammenfassung der erwarteten Leistung.
+- expectedElements: konkrete Einzelanforderungen.
+- Keine langen Fließtextblöcke.
+- Keine doppelten Kriterien.
+- Keine doppelten expectedElements.
+- Gib ausschließlich valides JSON zurück.
+
+JSON-Schema:
 {
+  "summary": "string",
   "criteria": [
     {
-      "bereich": "Verstehensleistung",
-      "kriterium": "Lyrische Form",
-      "beschreibung": "Die formale Gestaltung wird beschrieben.",
-      "erwartung": "Strophenanzahl und Reimschema werden korrekt benannt.",
+      "bereich": "string",
+      "kriterium": "string",
+      "beschreibung": "string",
+      "erwartung": "string",
       "expectedElements": [
         {
-          "label": "Strophen",
-          "erwartung": "drei Strophen"
-        },
-        {
-          "label": "Reimschema",
-          "erwartung": "Paarreim und Kreuzreim"
+          "label": "string",
+          "erwartung": "string"
         }
       ],
-      "gewichtung": "mittel",
+      "gewichtung": "string",
       "aktiv": true
     }
   ]
 }
 
-TEXT:
-${expectationHorizonText.slice(0, 12000)}
+Erwartungshorizont:
+${sourceText}
 `.trim();
 
-    const userMessage = imageBase64
-      ? {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: prompt,
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${imageMimeType};base64,${imageBase64}`,
-              },
-            },
-          ],
-        }
-      : {
-          role: "user",
-          content: prompt,
-        };
-
-    const response = await fetch(
-      "https://api.openai.com/v1/chat/completions",
+    const content: any[] = [
       {
+        type: "text",
+        text: prompt,
+      },
+    ];
+
+    if (imageBase64) {
+      content.push({
+        type: "image_url",
+        image_url: {
+          url: `data:${imageMimeType};base64,${imageBase64}`,
+        },
+      });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 26000);
+
+    let response: Response;
+
+    try {
+      response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
@@ -344,17 +250,23 @@ ${expectationHorizonText.slice(0, 12000)}
         body: JSON.stringify({
           model: "gpt-4.1-mini",
           temperature: 0,
+          max_tokens: 3500,
           messages: [
             {
               role: "system",
               content:
-                "Du extrahierst Bewertungsraster quellentreu und antwortest ausschließlich mit validem JSON.",
+                "Du extrahierst Bewertungsraster zuverlässig, allgemein, quellentreu und gibst ausschließlich valides JSON zurück.",
             },
-            userMessage,
+            {
+              role: "user",
+              content: imageBase64 ? content : prompt,
+            },
           ],
         }),
-      },
-    );
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const raw = await response.text();
 
@@ -364,47 +276,65 @@ ${expectationHorizonText.slice(0, 12000)}
         error: "OPENAI_ERROR",
         status: response.status,
         raw,
+        debug: {
+          durationMs: Date.now() - startedAt,
+          textLength: expectationHorizonText.length,
+          usedTextLength: sourceText.length,
+          imageMode: Boolean(imageBase64),
+          fileName,
+        },
       });
     }
 
     const completion = JSON.parse(raw);
-
-    const content =
-      completion?.choices?.[0]?.message?.content ?? "{}";
-
-    const parsed = extractJsonObject(content);
+    const contentText = completion?.choices?.[0]?.message?.content ?? "{}";
+    const parsed = extractJsonObject(contentText);
 
     const criteria = normalizeCriteria(
-      Array.isArray(parsed.criteria)
-        ? parsed.criteria
-        : [],
+      Array.isArray(parsed.criteria) ? parsed.criteria : [],
     );
 
     if (criteria.length === 0) {
       return sendJson(res, 500, {
         ok: false,
         error: "NO_CRITERIA_EXTRACTED",
-        rawContent: content,
+        rawContent: contentText,
+        debug: {
+          durationMs: Date.now() - startedAt,
+          textLength: expectationHorizonText.length,
+          usedTextLength: sourceText.length,
+          imageMode: Boolean(imageBase64),
+          fileName,
+        },
       });
     }
 
     return sendJson(res, 200, {
       ok: true,
-      summary: "Bewertungsraster erkannt",
+      summary: cleanOneLine(parsed.summary) || "Bewertungsraster erkannt",
       criteria,
       debug: {
+        durationMs: Date.now() - startedAt,
         count: criteria.length,
-        sourceTextLength:
-          expectationHorizonText.length,
+        textLength: expectationHorizonText.length,
+        usedTextLength: sourceText.length,
         imageMode: Boolean(imageBase64),
+        fileName,
       },
       usage: completion?.usage ?? null,
     });
   } catch (error: any) {
+    const isAbort = error?.name === "AbortError";
+
     return sendJson(res, 500, {
       ok: false,
-      error: "EXTRACT_CRITERIA_FAILED",
-      message: error?.message ?? String(error),
+      error: isAbort ? "OPENAI_TIMEOUT" : "EXTRACT_CRITERIA_FAILED",
+      message: isAbort
+        ? "Die Rasterextraktion hat zu lange gedauert."
+        : error?.message ?? String(error),
+      debug: {
+        durationMs: Date.now() - startedAt,
+      },
     });
   }
 }
