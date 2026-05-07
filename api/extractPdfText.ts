@@ -6,25 +6,9 @@ export const config = {
   maxDuration: 30,
 };
 
-function applyCors(res: any) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
-
 function sendJson(res: any, status: number, payload: unknown) {
-  applyCors(res);
   res.setHeader("Content-Type", "application/json");
   return res.status(status).json(payload);
-}
-
-function cleanText(value: unknown): string {
-  return String(value ?? "")
-    .replace(/\u0000/g, "")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 function stripDataUrl(value: string): string {
@@ -38,11 +22,20 @@ function stripDataUrl(value: string): string {
   return cleaned;
 }
 
+function cleanExtractedText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function parseRequestBody(req: any): {
   imageBase64: string;
   fileName: string;
 } {
-  const body = req.body;
+  const body = req.body ?? {};
 
   if (typeof body === "string") {
     try {
@@ -60,18 +53,12 @@ function parseRequestBody(req: any): {
   }
 
   return {
-    imageBase64: String(body?.imageBase64 ?? body?.fileBase64 ?? ""),
-    fileName: String(body?.fileName ?? "upload.pdf"),
+    imageBase64: String(body.imageBase64 ?? body.fileBase64 ?? ""),
+    fileName: String(body.fileName ?? "upload.pdf"),
   };
 }
 
 export default async function handler(req: any, res: any) {
-  applyCors(res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
   if (req.method !== "POST") {
     return sendJson(res, 405, {
       ok: false,
@@ -91,13 +78,13 @@ export default async function handler(req: any, res: any) {
 
     const buffer = Buffer.from(stripDataUrl(imageBase64), "base64");
     const parsed = await pdfParse(buffer);
-    const text = cleanText(parsed?.text ?? "");
+    const text = cleanExtractedText(parsed?.text ?? "");
 
     return sendJson(res, 200, {
       ok: true,
       text,
       debug: {
-        method: "pdf-parse",
+        method: "local-vercel-pdf-parse",
         fileName,
         textLength: text.length,
         pages: parsed?.numpages ?? null,
