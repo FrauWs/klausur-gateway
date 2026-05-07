@@ -1,16 +1,9 @@
 // api/extractCriteria.ts
 
-import OpenAI from "openai";
-
-declare const process: {
-  env: {
-    OPENAI_API_KEY?: string;
-  };
+export const config = {
+  runtime: "nodejs",
+  maxDuration: 30,
 };
-
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -26,38 +19,33 @@ function applyCors(res: any) {
 
 function json(res: any, status: number, payload: unknown) {
   applyCors(res);
-  return res.status(status).json(payload);
+  res.status(status).json(payload);
 }
 
-function clean(value: unknown): string {
-  return String(value ?? "")
-    .replace(/\s+/g, " ")
+function clean(input: unknown): string {
+  return String(input ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-function dedupe(lines: string[]): string[] {
-  const seen = new Set<string>();
+function extractJson(raw: string) {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
 
-  return lines.filter((line) => {
-    const normalized = line
-      .toLowerCase()
-      .replace(/\s+/g, " ")
-      .trim();
+  if (start === -1 || end === -1) {
+    throw new Error("NO_JSON_IN_OPENAI_RESPONSE");
+  }
 
-    if (!normalized) return false;
-
-    if (seen.has(normalized)) {
-      return false;
-    }
-
-    seen.add(normalized);
-    return true;
-  });
+  return JSON.parse(raw.slice(start, end + 1));
 }
 
 export default async function handler(req: any, res: any) {
+  applyCors(res);
+
   if (req.method === "OPTIONS") {
-    applyCors(res);
     return res.status(200).end();
   }
 
@@ -69,170 +57,121 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const body = req.body ?? {};
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    if (!apiKey) {
+      return json(res, 500, {
+        ok: false,
+        error: "MISSING_OPENAI_API_KEY",
+      });
+    }
 
     const expectationHorizonText = clean(
-      body.expectationHorizonText,
+      req.body?.expectationHorizonText ?? "",
     );
 
     if (!expectationHorizonText) {
       return json(res, 400, {
         ok: false,
-        error: "NO_TEXT",
+        error: "NO_EXPECTATION_HORIZON_TEXT",
       });
     }
 
-    const systemPrompt = `
-Du extrahierst Bewertungsraster aus deutschen Erwartungshorizonten.
+    const prompt = `
+Extrahiere aus dem folgenden Bewertungsraster eine strukturierte Kriterienliste.
 
-WICHTIGE REGELN:
+Regeln:
+- Keine Wiederholungen.
+- Kurze Kriterien.
+- expectedElements nur als konkrete Stichpunkte.
+- Kein Fließtext.
+- Maximal 16 Kriterien.
+- Antworte ausschließlich als JSON.
 
-- Keine Wiederholungen
-- Keine doppelten Inhalte
-- Keine langen Fließtexte
-- Keine Rekonstruktion kompletter Absätze
-- Keine Formulierungen wie:
-  - "Konkrete Anforderungen:"
-  - "Erwartet:"
-  - "Du hast..."
-- Maximal 1-2 Sätze pro Beschreibung
-- expectedElements nur als kurze Einzelpunkte
-- Niemals denselben Satz mehrfach ausgeben
-
-Antworte ausschließlich als JSON.
-
-FORMAT:
-
+Format:
 {
   "criteria": [
     {
       "bereich": "Inhalt",
       "kriterium": "Interpretationshypothese",
-      "beschreibung": "Hypothese zur Bedeutung formuliert.",
-      "erwartung": "Deutung nachvollziehbar erklärt.",
+      "beschreibung": "Die Deutungsidee wird nachvollziehbar dargestellt.",
+      "erwartung": "Eine schlüssige Interpretation wird formuliert.",
       "expectedElements": [
         {
           "label": "Symbolik",
-          "erwartung": "Pflaumenbaum als Symbol erkannt."
+          "erwartung": "Der Pflaumenbaum wird symbolisch gedeutet."
         }
       ],
-      "gewichtung": "mittel",
+      "gewichtung": "hoch",
       "aktiv": true
     }
   ]
 }
-`;
 
-    const userPrompt = `
-Extrahiere daraus ein sauberes Bewertungsraster:
+TEXT:
+${expectationHorizonText.slice(0, 12000)}
+`.trim();
 
-${expectationHorizonText}
-`;
-
-    const completion = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.1,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
+    const openAiResponse = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
         },
-        {
-          role: "user",
-          content: userPrompt,
-        },
-      ],
-    });
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          temperature: 0,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Du extrahierst Bewertungsraster und antwortest ausschließlich mit validem JSON.",
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+        }),
+      },
+    );
 
-    const raw =
-      completion.choices?.[0]?.message?.content ?? "{}";
+    const raw = await openAiResponse.text();
 
-    console.log("EXTRACT_CRITERIA_RAW", raw);
-
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-
-    if (start === -1 || end === -1) {
+    if (!openAiResponse.ok) {
       return json(res, 500, {
         ok: false,
-        error: "NO_JSON_FOUND",
+        error: "OPENAI_REQUEST_FAILED",
+        status: openAiResponse.status,
         raw,
       });
     }
 
-    const jsonString = raw.slice(start, end + 1);
+    const parsedOpenAi = JSON.parse(raw);
 
-    let parsed: any = {};
+    const content =
+      parsedOpenAi?.choices?.[0]?.message?.content ?? "{}";
 
-    try {
-      parsed = JSON.parse(jsonString);
-    } catch (error: any) {
-      return json(res, 500, {
-        ok: false,
-        error: "INVALID_JSON",
-        message: error?.message ?? String(error),
-        raw: jsonString,
-      });
-    }
-
-    const criteriaRaw = Array.isArray(parsed.criteria)
-      ? parsed.criteria
-      : [];
-
-    const criteria = criteriaRaw.map((criterion: any, index: number) => {
-      const expectedElements = Array.isArray(
-        criterion.expectedElements,
-      )
-        ? dedupe(
-            criterion.expectedElements.map((item: any) =>
-              clean(
-                `${clean(item?.label)}: ${clean(item?.erwartung)}`,
-              ),
-            ),
-          ).map((line) => {
-            const parts = line.split(":");
-
-            return {
-              label: clean(parts[0]),
-              erwartung: clean(parts.slice(1).join(":")),
-            };
-          })
-        : [];
-
-      return {
-        id: criterion.id ?? `crit-${index}`,
-
-        bereich: clean(criterion.bereich),
-
-        kriterium: clean(criterion.kriterium),
-
-        beschreibung: clean(criterion.beschreibung),
-
-        erwartung: clean(criterion.erwartung),
-
-        expectedElements,
-
-        gewichtung: clean(criterion.gewichtung || "mittel"),
-
-        aktiv: criterion.aktiv !== false,
-      };
-    });
+    const parsed = extractJson(content);
 
     return json(res, 200, {
       ok: true,
-      criteria,
-      debug: {
-        count: criteria.length,
-        sourceTextLength: expectationHorizonText.length,
-      },
+      criteria: parsed.criteria ?? [],
+      usage: parsedOpenAi?.usage ?? null,
     });
   } catch (error: any) {
-    console.error("EXTRACT_CRITERIA_FATAL", error);
+    console.error("extractCriteria crash", error);
 
     return json(res, 500, {
       ok: false,
-      error: "EXTRACT_FAILED",
+      error: "EXTRACT_CRITERIA_FAILED",
       message: error?.message ?? String(error),
+      stack:
+        process.env.NODE_ENV === "development"
+          ? error?.stack
+          : undefined,
     });
   }
 }
