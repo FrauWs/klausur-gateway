@@ -6,23 +6,25 @@ export const config = {
   maxDuration: 30,
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-  "Access-Control-Max-Age": "86400",
-};
-
 function applyCors(res: any) {
-  Object.entries(corsHeaders).forEach(([key, value]) => {
-    res.setHeader(key, value);
-  });
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 function sendJson(res: any, status: number, payload: unknown) {
   applyCors(res);
   res.setHeader("Content-Type", "application/json");
   return res.status(status).json(payload);
+}
+
+function cleanText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function stripDataUrl(value: string): string {
@@ -36,13 +38,31 @@ function stripDataUrl(value: string): string {
   return cleaned;
 }
 
-function cleanExtractedText(value: unknown): string {
-  return String(value ?? "")
-    .replace(/\u0000/g, "")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+function parseRequestBody(req: any): {
+  imageBase64: string;
+  fileName: string;
+} {
+  const body = req.body;
+
+  if (typeof body === "string") {
+    try {
+      const parsed = JSON.parse(body);
+      return {
+        imageBase64: String(parsed.imageBase64 ?? parsed.fileBase64 ?? ""),
+        fileName: String(parsed.fileName ?? "upload.pdf"),
+      };
+    } catch {
+      return {
+        imageBase64: body,
+        fileName: "upload.pdf",
+      };
+    }
+  }
+
+  return {
+    imageBase64: String(body?.imageBase64 ?? body?.fileBase64 ?? ""),
+    fileName: String(body?.fileName ?? "upload.pdf"),
+  };
 }
 
 export default async function handler(req: any, res: any) {
@@ -60,22 +80,18 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const body = req.body ?? {};
+    const { imageBase64, fileName } = parseRequestBody(req);
 
-    const rawBase64 = String(body.imageBase64 ?? body.fileBase64 ?? "").trim();
-    const fileName = String(body.fileName ?? "upload.pdf");
-
-    if (!rawBase64) {
+    if (!imageBase64) {
       return sendJson(res, 400, {
         ok: false,
         error: "NO_FILE",
       });
     }
 
-    const buffer = Buffer.from(stripDataUrl(rawBase64), "base64");
+    const buffer = Buffer.from(stripDataUrl(imageBase64), "base64");
     const parsed = await pdfParse(buffer);
-
-    const text = cleanExtractedText(parsed?.text ?? "");
+    const text = cleanText(parsed?.text ?? "");
 
     return sendJson(res, 200, {
       ok: true,
