@@ -29,7 +29,7 @@ function json(res: any, status: number, payload: unknown) {
   return res.status(status).json(payload);
 }
 
-function cleanup(value: unknown): string {
+function clean(value: unknown): string {
   return String(value ?? "")
     .replace(/\s+/g, " ")
     .trim();
@@ -71,7 +71,7 @@ export default async function handler(req: any, res: any) {
   try {
     const body = req.body ?? {};
 
-    const expectationHorizonText = cleanup(
+    const expectationHorizonText = clean(
       body.expectationHorizonText,
     );
 
@@ -87,37 +87,39 @@ Du extrahierst Bewertungsraster aus deutschen Erwartungshorizonten.
 
 WICHTIGE REGELN:
 
-1. Keine Wiederholungen.
-2. Keine doppelten Inhalte.
-3. Keine Rekonstruktion ganzer Absätze.
-4. Keine Vermischung mehrerer Kriterien.
-5. Jedes Kriterium MUSS kurz und eindeutig sein.
-6. expectedElements dürfen nur konkrete Stichpunkte enthalten.
-7. Keine Formulierungen wie:
-   - "Konkrete Anforderungen:"
-   - "Erwartet:"
-   - "Du hast..."
-8. Niemals denselben Satz mehrfach ausgeben.
-9. Keine langen Fließtexte.
-10. Maximal 1-2 Sätze pro Beschreibung.
-11. expectedElements nur als kurze Einzelpunkte.
-12. Keine Rekonstruktion des kompletten Erwartungshorizonts.
+- Keine Wiederholungen
+- Keine doppelten Inhalte
+- Keine langen Fließtexte
+- Keine Rekonstruktion kompletter Absätze
+- Keine Formulierungen wie:
+  - "Konkrete Anforderungen:"
+  - "Erwartet:"
+  - "Du hast..."
+- Maximal 1-2 Sätze pro Beschreibung
+- expectedElements nur als kurze Einzelpunkte
+- Niemals denselben Satz mehrfach ausgeben
+
+Antworte ausschließlich als JSON.
 
 FORMAT:
 
 {
-  "bereich": "Inhalt",
-  "kriterium": "Interpretationshypothese",
-  "beschreibung": "Hypothese zur Bedeutung des Gedichts formuliert.",
-  "erwartung": "Deutung nachvollziehbar erklärt.",
-  "expectedElements": [
+  "criteria": [
     {
-      "label": "Symbolik",
-      "erwartung": "Pflaumenbaum als Symbol erkannt."
+      "bereich": "Inhalt",
+      "kriterium": "Interpretationshypothese",
+      "beschreibung": "Hypothese zur Bedeutung formuliert.",
+      "erwartung": "Deutung nachvollziehbar erklärt.",
+      "expectedElements": [
+        {
+          "label": "Symbolik",
+          "erwartung": "Pflaumenbaum als Symbol erkannt."
+        }
+      ],
+      "gewichtung": "mittel",
+      "aktiv": true
     }
-  ],
-  "gewichtung": "mittel",
-  "aktiv": true
+  ]
 }
 `;
 
@@ -130,9 +132,6 @@ ${expectationHorizonText}
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0.1,
-      response_format: {
-        type: "json_object",
-      },
       messages: [
         {
           role: "system",
@@ -145,17 +144,34 @@ ${expectationHorizonText}
       ],
     });
 
-    const raw = completion.choices?.[0]?.message?.content ?? "{}";
+    const raw =
+      completion.choices?.[0]?.message?.content ?? "{}";
+
+    console.log("EXTRACT_CRITERIA_RAW", raw);
+
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+
+    if (start === -1 || end === -1) {
+      return json(res, 500, {
+        ok: false,
+        error: "NO_JSON_FOUND",
+        raw,
+      });
+    }
+
+    const jsonString = raw.slice(start, end + 1);
 
     let parsed: any = {};
 
     try {
-      parsed = JSON.parse(raw);
-    } catch {
+      parsed = JSON.parse(jsonString);
+    } catch (error: any) {
       return json(res, 500, {
         ok: false,
         error: "INVALID_JSON",
-        raw,
+        message: error?.message ?? String(error),
+        raw: jsonString,
       });
     }
 
@@ -169,16 +185,16 @@ ${expectationHorizonText}
       )
         ? dedupe(
             criterion.expectedElements.map((item: any) =>
-              cleanup(
-                `${cleanup(item?.label)}: ${cleanup(item?.erwartung)}`,
+              clean(
+                `${clean(item?.label)}: ${clean(item?.erwartung)}`,
               ),
             ),
           ).map((line) => {
             const parts = line.split(":");
 
             return {
-              label: cleanup(parts[0]),
-              erwartung: cleanup(parts.slice(1).join(":")),
+              label: clean(parts[0]),
+              erwartung: clean(parts.slice(1).join(":")),
             };
           })
         : [];
@@ -186,17 +202,17 @@ ${expectationHorizonText}
       return {
         id: criterion.id ?? `crit-${index}`,
 
-        bereich: cleanup(criterion.bereich),
+        bereich: clean(criterion.bereich),
 
-        kriterium: cleanup(criterion.kriterium),
+        kriterium: clean(criterion.kriterium),
 
-        beschreibung: cleanup(criterion.beschreibung),
+        beschreibung: clean(criterion.beschreibung),
 
-        erwartung: cleanup(criterion.erwartung),
+        erwartung: clean(criterion.erwartung),
 
         expectedElements,
 
-        gewichtung: cleanup(criterion.gewichtung || "mittel"),
+        gewichtung: clean(criterion.gewichtung || "mittel"),
 
         aktiv: criterion.aktiv !== false,
       };
@@ -211,6 +227,8 @@ ${expectationHorizonText}
       },
     });
   } catch (error: any) {
+    console.error("EXTRACT_CRITERIA_FATAL", error);
+
     return json(res, 500, {
       ok: false,
       error: "EXTRACT_FAILED",
