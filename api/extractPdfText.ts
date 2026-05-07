@@ -1,29 +1,31 @@
 // api/extractPdfText.ts
 
-import pdfParse from "pdf-parse";
+import pdf from "pdf-parse";
 
 export const config = {
+  runtime: "nodejs",
   maxDuration: 30,
 };
 
-function sendJson(res: any, status: number, payload: unknown) {
-  res.setHeader("Content-Type", "application/json");
-  return res.status(status).json(payload);
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+function applyCors(res: any) {
+  Object.entries(corsHeaders).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
 }
 
-function stripDataUrl(value: string): string {
-  const cleaned = String(value ?? "").trim();
-  const commaIndex = cleaned.indexOf(",");
-
-  if (cleaned.startsWith("data:") && commaIndex >= 0) {
-    return cleaned.slice(commaIndex + 1);
-  }
-
-  return cleaned;
+function json(res: any, status: number, payload: unknown) {
+  applyCors(res);
+  res.status(status).json(payload);
 }
 
-function cleanExtractedText(value: unknown): string {
-  return String(value ?? "")
+function cleanText(input: unknown): string {
+  return String(input ?? "")
     .replace(/\u0000/g, "")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+/g, " ")
@@ -31,69 +33,54 @@ function cleanExtractedText(value: unknown): string {
     .trim();
 }
 
-function parseRequestBody(req: any): {
-  imageBase64: string;
-  fileName: string;
-} {
-  const body = req.body ?? {};
+export default async function handler(req: any, res: any) {
+  applyCors(res);
 
-  if (typeof body === "string") {
-    try {
-      const parsed = JSON.parse(body);
-      return {
-        imageBase64: String(parsed.imageBase64 ?? parsed.fileBase64 ?? ""),
-        fileName: String(parsed.fileName ?? "upload.pdf"),
-      };
-    } catch {
-      return {
-        imageBase64: body,
-        fileName: "upload.pdf",
-      };
-    }
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  return {
-    imageBase64: String(body.imageBase64 ?? body.fileBase64 ?? ""),
-    fileName: String(body.fileName ?? "upload.pdf"),
-  };
-}
-
-export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
-    return sendJson(res, 405, {
+    return json(res, 405, {
       ok: false,
       error: "METHOD_NOT_ALLOWED",
     });
   }
 
   try {
-    const { imageBase64, fileName } = parseRequestBody(req);
+    const base64 = String(req.body?.fileBase64 ?? "").trim();
 
-    if (!imageBase64) {
-      return sendJson(res, 400, {
+    if (!base64) {
+      return json(res, 400, {
         ok: false,
-        error: "NO_FILE",
+        error: "NO_FILE_BASE64",
       });
     }
 
-    const buffer = Buffer.from(stripDataUrl(imageBase64), "base64");
-    const parsed = await pdfParse(buffer);
-    const text = cleanExtractedText(parsed?.text ?? "");
+    const pureBase64 = base64.includes(",")
+      ? base64.split(",")[1]
+      : base64;
 
-    return sendJson(res, 200, {
+    const buffer = Buffer.from(pureBase64, "base64");
+
+    const parsed = await pdf(buffer);
+
+    const text = cleanText(parsed?.text ?? "");
+
+    return json(res, 200, {
       ok: true,
       text,
       debug: {
-        method: "local-vercel-pdf-parse",
-        fileName,
         textLength: text.length,
         pages: parsed?.numpages ?? null,
       },
     });
   } catch (error: any) {
-    return sendJson(res, 500, {
+    console.error("extractPdfText crash", error);
+
+    return json(res, 500, {
       ok: false,
-      error: "PDF_PARSE_FAILED",
+      error: "PDF_TEXT_EXTRACTION_FAILED",
       message: error?.message ?? String(error),
     });
   }
